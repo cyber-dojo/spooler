@@ -58,3 +58,35 @@ remove_all_but_latest()
     fi
   done
 }
+
+exit_non_zero_unless_file_exists()
+{
+  local -r filename="${1}"
+  if [ ! -f "${filename}" ]; then
+    stderr "${filename} does not exist"
+    exit_non_zero
+  fi
+}
+
+service_container()
+{
+  # Echo the container id of the given docker-compose service within this
+  # repo's project. Resolving by label (not a fixed container_name) lets
+  # several spooler runs, and runs in sibling repos, coexist without
+  # colliding. The project defaults to spooler when not exported.
+  local -r service="${1}"
+  docker ps \
+    --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-spooler}" \
+    --filter "label=com.docker.compose.service=${service}" \
+    --format '{{.ID}}'
+}
+
+echo_warnings()
+{
+  local -r SERVICE_NAME="${1}"
+  local -r DOCKER_LOG=$(docker logs "${CONTAINER_NAME}" 2>&1)
+  if echo "${DOCKER_LOG}" | grep --quiet "warning" ; then
+    echo "Warnings in ${SERVICE_NAME} container"
+    echo "${DOCKER_LOG}"
+  fi
+}

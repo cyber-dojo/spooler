@@ -485,6 +485,19 @@ B1: insert the spooler as a transparent pass-through proxy.
   direct to saver. Byte-identical behavior (pure relay, no state). Reversible by
   repointing web back. Proves the new stateful service in the path with zero
   semantic change.
+  DONE (spooler): the service exists as saver's structural twin (`sinatra-base`
+  Rack app: `App` routing table, `AppBase`, `Externals`, `Prober`) and builds to
+  an image with working alive/ready probes (section 9). The nine event writes
+  (`kata_file_create` ... `kata_checked_out`) are exposed by a `post_pass_through`
+  route macro and relayed to saver verbatim - status, content-type, and body,
+  including a 500 - by `External::Saver` over the injectable `Externals#http` seam
+  (`HttpJson::Requester`); pure relay, no state. saver is located by
+  `CYBER_DOJO_SAVER_HOSTNAME`/`CYBER_DOJO_SAVER_PORT`, as web's client already does.
+  Non-event writes (`kata_create`, forks, `kata_option_set`, group ops) are not
+  routed through the spooler; like reads they stay direct web->saver. Server-side
+  tests mirror saver's harness and stub the http seam. NOT yet done: repointing
+  web's `saver_service.rb` (web-side), and the spooler's EBS host_path volume and
+  deployment terraform (section 8) - so nothing yet sends live traffic through it.
 
 B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   The spooler persists each write to its WAL log before forwarding, still

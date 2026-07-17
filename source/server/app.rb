@@ -12,7 +12,19 @@ class App < AppBase
   get_json(:prober, :sha)
 
   # - - - - - - - - - - - - - - - - -
-  # The write-API routes (kata_file_create ... kata_checked_out) are added
-  # when the spooler becomes a pass-through proxy in front of saver (ADR B1).
+  # Pass-through write API (ADR B1): each POST is relayed to saver verbatim,
+  # including a 500. Reads stay direct web->saver, so only writes appear here.
+  # The range is saver's per-kata event writes (kata_file_create ... kata_checked_out).
+
+  post_pass_through(:kata_file_create)
+  post_pass_through(:kata_file_delete)
+  post_pass_through(:kata_file_rename)
+  post_pass_through(:kata_file_edit)
+
+  post_pass_through(:kata_ran_tests)
+  post_pass_through(:kata_predicted_right)
+  post_pass_through(:kata_predicted_wrong)
+  post_pass_through(:kata_reverted)
+  post_pass_through(:kata_checked_out)
 
 end

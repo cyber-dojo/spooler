@@ -48,6 +48,20 @@ class AppBase < Sinatra::Base
     end
   end
 
+  # - - - - - - - - - - - - - - - - - - - - - -
+
+  def self.post_pass_through(path)
+    # Register a POST route that relays the request to saver and returns
+    # saver's response verbatim: status (including a non-2xx such as 500),
+    # content-type, and body. Pure relay, no state (ADR B1).
+    post "/#{path}" do
+      relayed = @externals.saver.forward(path.to_s, request_body)
+      status(relayed.code.to_i)
+      headers['Content-Type'] = relayed.content_type || 'application/json'
+      body(relayed.body)
+    end
+  end
+
   private
 
   include JsonAdapter

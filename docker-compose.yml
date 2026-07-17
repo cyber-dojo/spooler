@@ -16,3 +16,4 @@ services:
       - /tmp
     volumes:
       - ./source/server:/spooler/source:ro
+      - ./test/server:/spooler/test:ro

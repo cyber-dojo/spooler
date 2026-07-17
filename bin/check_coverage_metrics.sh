@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -Eeu
+
+export ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/bin/lib.sh"
+source "${ROOT_DIR}/bin/echo_env_vars.sh"
+export $(echo_env_vars)
+
+show_help()
+{
+    local -r MY_NAME=$(basename "${BASH_SOURCE[0]}")
+    cat <<- EOF
+
+    Use: ${MY_NAME} {server}
+
+    Options:
+      -h    Show this help
+
+    Check test coverage metrics for tests run from inside the server container.
+
+    Example:
+      ${MY_NAME} server
+
+EOF
+}
+
+check_args()
+{
+  case "${1:-}" in
+    '-h' | '--help')
+      show_help
+      exit 0
+      ;;
+    'server')
+      ;;
+    '')
+      show_help
+      stderr "no argument - must be 'server'"
+      exit_non_zero
+      ;;
+    *)
+      show_help
+      stderr "argument is '${1:-}' - must be 'server'"
+      exit_non_zero
+  esac
+}
+
+check_coverage_metrics()
+{
+  check_args "$@"
+
+  local -r TYPE="${1}"           # {server}
+  local -r TEST_LOG=test.log
+  local -r HOST_TEST_DIR="${ROOT_DIR}/test/${TYPE}"
+  local -r HOST_REPORTS_DIR="${ROOT_DIR}/reports/${TYPE}"  # where report json files have been written to
+  local -r CONTAINER_TMP_DIR=/tmp
+
+  exit_non_zero_unless_file_exists "${HOST_TEST_DIR}/config/check_metrics.rb"           # evaluator
+  exit_non_zero_unless_file_exists "${HOST_REPORTS_DIR}/coverage_metrics.json"          # data from test run
+  exit_non_zero_unless_file_exists "${HOST_TEST_DIR}/config/coverage_metrics_limits.rb" # metric limits
+
+  set +e
+  docker run \
+    --read-only \
+    --rm \
+    --entrypoint="" \
+    --volume ${HOST_TEST_DIR}/config/check_metrics.rb:${CONTAINER_TMP_DIR}/check_metrics.rb:ro \
+    --volume ${HOST_REPORTS_DIR}/coverage_metrics.json:${CONTAINER_TMP_DIR}/coverage_metrics.json:ro \
+    --volume ${HOST_TEST_DIR}/config/coverage_metrics_limits.rb:${CONTAINER_TMP_DIR}/coverage_metrics_limits.rb:ro \
+      "${CYBER_DOJO_SPOOLER_IMAGE}:${CYBER_DOJO_SPOOLER_TAG}" \
+        sh -c "ruby ${CONTAINER_TMP_DIR}/check_metrics.rb ${CONTAINER_TMP_DIR}/coverage_metrics.json coverage_metrics_limits" \
+        2>/dev/null | tee -a "${HOST_REPORTS_DIR}/${TEST_LOG}"
+
+  local -r STATUS=${PIPESTATUS[0]}
+  set -e
+
+  echo "${TYPE} coverage metrics status == ${STATUS}"
+  echo
+  return "${STATUS}"
+}
+
+check_coverage_metrics "$@"

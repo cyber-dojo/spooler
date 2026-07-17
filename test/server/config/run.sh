@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -Eeu
+
+readonly MY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export COVERAGE_ROOT="${1}" # eg /tmp/coverage
+readonly TEST_LOG="${2}"    # eg test.log
+readonly TYPE="${3}"        # eg server
+shift; shift; shift
+
+readonly TEST_FILES=(${MY_DIR}/../*.rb)
+readonly TEST_ARGS=(${*})
+
+readonly SCRIPT="
+\$stdout.sync = true
+require '${MY_DIR}/coverage.rb'
+%w(${TEST_FILES[*]}).shuffle.each{ |file|
+  require file
+}"
+
+mkdir -p ${COVERAGE_ROOT}
+
+set +e
+export RUBYOPT='-W2 --enable-frozen-string-literal'
+ruby -e "${SCRIPT}" -- ${TEST_ARGS[@]} 2>&1 | tee ${COVERAGE_ROOT}/${TEST_LOG}
+STATUS=${PIPESTATUS[0]}
+set -e
+
+exit "${STATUS}"
