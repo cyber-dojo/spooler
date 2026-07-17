@@ -1,0 +1,11 @@
+.DS_Store
+
+CLAUDE.md
+
+reports/*
+reports/.*
+
+snyk.container.scan.json
+snyk.code.scan.json
+snyk.log.stdout
+snyk.log.stderr

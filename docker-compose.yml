@@ -1,0 +1,18 @@
+
+services:
+
+  server:
+    platform: linux/amd64
+    build:
+      context: .
+      args:
+        - COMMIT_SHA
+    image: ${CYBER_DOJO_SPOOLER_IMAGE}:${CYBER_DOJO_SPOOLER_TAG}
+    user: ${CYBER_DOJO_SPOOLER_SERVER_USER}
+    env_file: [ .env ]
+    read_only: true
+    restart: no
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./source/server:/spooler/source:ro
