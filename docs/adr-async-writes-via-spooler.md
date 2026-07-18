@@ -72,30 +72,30 @@ web builds the light from runner's outcome and returns it immediately. It is
 not gated on saver or on the spooler forwarding to saver. saver being down
 becomes "the spooler has not drained yet", not "no light".
 
-### 3. Ordering: (laptop_id, tab_id, client_seq) and a reorder buffer
+### 3. Ordering: (laptop_id, tab_id, tab_seq) and a reorder buffer
 
 Arrival order at the spooler cannot be trusted: two fire-and-forget POSTs can
 be reordered by the browser connection pool, proxies, or retries. So each event
-is stamped by the browser with `(laptop_id, tab_id, client_seq)`:
+is stamped by the browser with `(laptop_id, tab_id, tab_seq)`:
 
 - `laptop_id` is the per-browser cookie, shared by every tab of one browser.
 - `tab_id` is a random id the browser generates once per tab and holds for the
   tab's lifetime. It is needed because one `laptop_id` can drive more than one
-  tab and each tab runs its own `client_seq` from the same start; keyed on
-  laptop_id and client_seq alone, two tabs of one browser would collide and one
+  tab and each tab runs its own `tab_seq` from the same start; keyed on
+  laptop_id and tab_seq alone, two tabs of one browser would collide and one
   tab's writes would be dropped as false duplicates of the other's. `tab_id`
   makes each tab a distinct ordered writer.
-- `client_seq` is that tab's own monotonic event counter - the true production
+- `tab_seq` is that tab's own monotonic event counter - the true production
   order for that tab.
 
 - The spooler keeps, per `(laptop_id, tab_id, kata)`, the next expected
-  `client_seq`. It releases events to saver in `client_seq` order, buffering
+  `tab_seq`. It releases events to saver in `tab_seq` order, buffering
   out-of-order arrivals until the gap fills.
-- A `client_seq` that never arrives within a bounded wait is skipped. Because
+- A `tab_seq` that never arrives within a bounded wait is skipped. Because
   test events are sync-acked (they cannot be silently lost), the only thing that
   can ever be a missing seq is a fire-and-forget ITE, which is superseded by the
   next event, so skipping it is always safe.
-- `(laptop_id, tab_id, client_seq)` doubles as the idempotency key: a redelivered or
+- `(laptop_id, tab_id, tab_seq)` doubles as the idempotency key: a redelivered or
   re-fired event with the same pair is a no-op at saver.
 
 In-order forwarding is required even though files are cumulative: saver is
@@ -160,8 +160,8 @@ The spooler persists its buffer in an embedded SQLite database (WAL mode) on its
 own volume. This matches the house style (each cyber-dojo service is a small
 HTTP service over one disk primitive; saver is Sinatra + git-on-disk, the
 spooler is Sinatra + SQLite-on-disk), relies only on a disk, and behaves
-identically on AWS and standalone. SQLite gives ordering (`client_seq`),
-idempotency (a unique constraint on `(laptop_id, tab_id, client_seq)`), and crash-safe
+identically on AWS and standalone. SQLite gives ordering (`tab_seq`),
+idempotency (a unique constraint on `(laptop_id, tab_id, tab_seq)`), and crash-safe
 durability (WAL fsync); WAL's reader/writer split matches the write-optimised,
 eventually-consistent-read intent. Its single-writer model is the serialisation
 point that lets saver shed its concurrency machinery.
@@ -194,7 +194,7 @@ the same on-disk store the old (blue) task was using. For saver that is the git
 repos; for the spooler it is the SQLite database and its WAL. This is the whole
 mechanism by which the spooler's buffered-but-undrained events survive a spooler
 upgrade: they are on the host disk, and the new version reads them on start and
-resumes forwarding, deduplicated by `(laptop_id, tab_id, client_seq)`.
+resumes forwarding, deduplicated by `(laptop_id, tab_id, tab_seq)`.
 
 The blue-green overlap window (green live and healthy before blue is drained) is
 the only subtlety, and it is where the spooler's embedded SQLite is actually safer
@@ -212,7 +212,7 @@ may write:
   already forces: the EBS directory exists on exactly one host, so any task that
   can mount it is on that host.
 
-Idempotency does double duty here. The `(laptop_id, tab_id, client_seq)` key (section 7)
+Idempotency does double duty here. The `(laptop_id, tab_id, tab_seq)` key (section 7)
 makes a redelivery a no-op at saver, which covers not only crash-replay but the
 overlap case where blue and green both forward the same queued event to saver
 during cutover.
@@ -318,7 +318,7 @@ Browser owns a binding index.
   false-lock (a tab recognises its own writes by `tab_id`); reads are eventually
   consistent.
 - saver simplifies. With a single per-kata ordered source of writes and
-  idempotency by `(laptop_id, tab_id, client_seq)`, the `update-ref` compare-and-swap
+  idempotency by `(laptop_id, tab_id, tab_seq)`, the `update-ref` compare-and-swap
   retry loop, the self-lag re-append, and the loser-rescue in
   saver `kata_v2.rb` have nothing left to do; saver reduces to an idempotent
   append, and the browser reads the committed stream (each event carrying its
@@ -346,7 +346,7 @@ noted inline; it is not a reason to combine them into one deploy.
 The sequence has two parts. Part A reaches asynchronous web->saver writes using
 ONLY web and saver (no new service). Part B introduces the spooler to make those
 writes durable and ordered. A short Bridge between them establishes the
-`(laptop_id, tab_id, client_seq)` idempotency key end-to-end (web + saver, still
+`(laptop_id, tab_id, tab_seq)` idempotency key end-to-end (web + saver, still
 no new service), pulling saver's dedup EXPAND forward so B4 becomes pure
 contraction. Throughout, READS stay direct web->saver via committed git; nginx and
 the other services are untouched.
@@ -486,28 +486,28 @@ At the end of Part A (through A6) web owns `major`, the client `index` is gone f
 the write path, and detection is read-side - all with no new service. A7 buys
 best-effort async; durable, ordered async is Part B.
 
-### Bridge - establish the client_seq idempotency key (web + saver, no spooler)
+### Bridge - establish the tab_seq idempotency key (web + saver, no spooler)
 
-The idempotency key `(laptop_id, tab_id, client_seq)` (sections 3, 7) can be put
+The idempotency key `(laptop_id, tab_id, tab_seq)` (sections 3, 7) can be put
 end-to-end BEFORE the spooler is in the path, because saver already stores
 `laptop_id` and `tab_id` (concatenated into the single per-event id, section 5) and
-only lacks `client_seq`. Landing the key here de-risks saver's contract change and
+only lacks `tab_seq`. Landing the key here de-risks saver's contract change and
 soaks web's stamping in production ahead of the spooler. It is the EXPAND half of
 B4 pulled forward, leaving B4 as pure contraction. Reads stay direct web->saver.
 
-A8 (saver): accept an optional `client_seq` and dedup on the full key.
-  saver takes an optional `client_seq` argument (default, so old callers and the
+A8 (saver): accept an optional `tab_seq` and dedup on the full key.
+  saver takes an optional `tab_seq` argument (default, so old callers and the
   current path still work - mirroring A3's optional-first discipline) and adds an
-  additive guard: a write whose `(laptop_id, tab_id, client_seq)` is already
+  additive guard: a write whose `(laptop_id, tab_id, tab_seq)` is already
   committed is a no-op. The guard COMPOSES with saver's existing `update-ref`
   compare-and-swap; the CAS is NOT removed here (web still writes directly, so many
   tabs append concurrently and saver still needs it). Placement stays `head + 1`;
-  `client_seq` is an opaque dedup token saver only compares, never a position - it
+  `tab_seq` is an opaque dedup token saver only compares, never a position - it
   is not the old flat `index` A6 removed. Strictly additive. Deploy before A9.
 
-A9 (web): stamp `tab_id` + monotonic `client_seq` and send it, synchronously.
-  web generates a per-tab `tab_id` and that tab's monotonic `client_seq`, and
-  includes `client_seq` in its write POSTs on the EXISTING direct-to-saver path.
+A9 (web): stamp `tab_id` + monotonic `tab_seq` and send it, synchronously.
+  web generates a per-tab `tab_id` and that tab's monotonic `tab_seq`, and
+  includes `tab_seq` in its write POSTs on the EXISTING direct-to-saver path.
   (This also introduces the `tab_id` the section-5 read-side stale-tab lock wants.)
   Writes stay SYNCHRONOUS - reorder protection is the spooler's job (B3), so going
   fire-and-forget now would let reordered direct writes regress file state. Direct
@@ -531,9 +531,9 @@ B1: insert the spooler as a transparent pass-through proxy.
   route macro; each request is forwarded to saver by `External::Saver` over the
   injectable `Externals#http` seam (`HttpJson::Requester`), and saver's response is
   relayed back verbatim - status, content-type, and body, including a 500. No state
-  is persisted. The forwarded request body has the spooler-owned `client_seq`
-  stripped first (the first slice of B2 below); every other field reaches saver
-  unchanged. saver is located by
+  is persisted. The request body is forwarded byte-for-byte, including the `tab_seq`
+  ordering field (saver, not the spooler, owns the write contract; saver's A8 dedup
+  reads it). saver is located by
   `CYBER_DOJO_SAVER_HOSTNAME`/`CYBER_DOJO_SAVER_PORT`, as web's client already does.
   Non-event writes (`kata_create`, forks, `kata_option_set`, group ops) are not
   routed through the spooler; like reads they stay direct web->saver. Server-side
@@ -554,13 +554,12 @@ B1: insert the spooler as a transparent pass-through proxy.
 
 B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   The spooler persists each write to its WAL log before forwarding, still
-  synchronously returning saver's response. The `(laptop_id, tab_id, client_seq)`
+  synchronously returning saver's response. The `(laptop_id, tab_id, tab_seq)`
   key is already end-to-end from the Bridge (A8/A9), so here the spooler stores the
-  arriving `client_seq` as its ordering/idempotency column. When web is repointed to
-  the spooler (B1b) the spooler must FORWARD `client_seq` to saver, flipping the
-  interim B1 strip, so saver's A8 dedup keeps receiving the key; the repoint is
-  gated on that flip. Behavior unchanged; the buffer now exists and a crash replays
-  un-acked forwards.
+  arriving `tab_seq` as its ordering/idempotency column. The spooler already
+  forwards `tab_seq` to saver verbatim (B1), so saver's A8 dedup keeps receiving the
+  key when web is repointed at the spooler (B1b). Behavior unchanged; the buffer now
+  exists and a crash replays un-acked forwards.
   DONE (spooler, groundwork only): the storage substrate this step needs is in
   place. The `sqlite3` gem is installed in the image (Alpine has no prebuilt gem,
   so it compiles its vendored SQLite amalgamation statically: the build toolchain
@@ -569,20 +568,19 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   from saver's `/cyber-dojo` - refusing to start unless it is mounted and writable
   by the spooler user (the test `docker-compose.yml` mounts `/sqlite` as a tmpfs
   owned by the spooler uid, mirroring saver's owned-tmpfs `/cyber-dojo`, so the
-  container boots for the test run). The spooler already accepts `client_seq` on
-  every write and strips it before forwarding to saver (saver's write contract has
-  no such field), so the field is on the wire and off saver's input; it is not yet
-  used for ordering. The rest of the durable-intake logic (WAL
-  persist-before-forward and the `(laptop_id, tab_id, client_seq)` schema) is not
+  container boots for the test run). The spooler forwards `tab_seq` to saver
+  verbatim in the write body (saver's A8 dedup owns it); the spooler does not yet
+  persist or use it for ordering. The rest of the durable-intake logic (WAL
+  persist-before-forward and the `(laptop_id, tab_id, tab_seq)` schema) is not
   yet written.
 
 B3: durable async via the spooler.
   ITE writes become fire-and-forget to the spooler's durable append; the spooler
-  forwards in `client_seq` order (reorder buffer; skip a never-arriving seq, safe
+  forwards in `tab_seq` order (reorder buffer; skip a never-arriving seq, safe
   because it can only be a superseded ITE). Test writes become synchronous to the
   spooler's durable ack (not saver's commit) and are retried until acked, so a test
   event is never lost - this UPGRADES A5's best-effort test writes to durable, and
-  fixes A5's ITE-reordering. Idempotency `(laptop_id, tab_id, client_seq)` makes redelivery
+  fixes A5's ITE-reordering. Idempotency `(laptop_id, tab_id, tab_seq)` makes redelivery
   a no-op. The diff-view read may briefly precede saver materialisation (spinner or
   poll, see Consequences). Gated on A1 (detection already read-side) and B2 (buffer
   proven).
@@ -617,7 +615,7 @@ Decided:
   briefly sees stale state) but never loses the write - freshness is bounded by
   the budget, durability is unconditional.
 - skip-timeout = 5s. The reorder buffer holds an out-of-order event waiting for a
-  missing `client_seq`; if the gap has not filled within 5s the drainer releases
+  missing `tab_seq`; if the gap has not filled within 5s the drainer releases
   past it. Out-of-order arrivals are expected to be rare, and waiting 5s for that
   rare case is acceptable. The skip only ever discards an ITE (a test event is
   sync-acked, so it can never be the missing seq) and a dropped ITE is harmless

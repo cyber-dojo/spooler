@@ -14,8 +14,7 @@ class PassThroughTest < TestBase
   end
 
   test 'Pt0002', %w(
-  | the request is forwarded to saver's same-named path, and a body carrying
-  | no client_seq reaches saver with its fields unchanged
+  | the request path and body are forwarded to saver byte-for-byte
   ) do
     stub = saver_returns(200, ran_tests_result)
     body = ran_tests_body
@@ -23,7 +22,7 @@ class PassThroughTest < TestBase
     assert_equal 1, stub.forwarded.size
     request = stub.forwarded[0]
     assert_equal '/kata_ran_tests', request.path
-    assert_equal JSON.parse(body), JSON.parse(request.body)
+    assert_equal body, request.body
   end
 
   test 'Pt0003', %w(
@@ -46,8 +45,8 @@ class PassThroughTest < TestBase
   end
 
   test 'Pt0005', %w(
-  | client_seq is a spooler-only ordering field: it is dropped from the write
-  | body before forwarding to saver, and every other field is forwarded intact
+  | the tab_seq ordering field is relayed to saver in the write body, not
+  | consumed by the spooler: saver owns the write contract
   ) do
     stub = saver_returns(200, ran_tests_result)
     sent = {
@@ -58,14 +57,12 @@ class PassThroughTest < TestBase
       status: '0',
       summary: 'red',
       laptop_id: laptop_id,
-      client_seq: 42
+      tab_seq: 42
     }
     post_json('/kata_ran_tests', sent.to_json)
     forwarded = JSON.parse(stub.forwarded[0].body)
-    refute forwarded.key?('client_seq'), 'client_seq must not reach saver'
-    expected = JSON.parse(sent.to_json)
-    expected.delete('client_seq')
-    assert_equal expected, forwarded
+    assert_equal 42, forwarded['tab_seq']
+    assert_equal JSON.parse(sent.to_json), forwarded
   end
 
   private

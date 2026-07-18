@@ -13,10 +13,9 @@ module HttpJson
     end
 
     def post(path, body)
-      # POST the given body string to path and return the raw response,
+      # POST the raw body string to path and return the raw response,
       # unparsed, so a caller can relay saver's response verbatim. The body
-      # is posted as-is (not re-serialized here), so the caller controls the
-      # exact bytes saver receives.
+      # is forwarded byte-for-byte (not re-serialized) to stay identical.
       uri = URI.parse("#{@base_url}/#{path}")
       request = Net::HTTP::Post.new(uri)
       request.content_type = 'application/json'
