@@ -5,7 +5,7 @@ image_server:
 	@${PWD}/bin/build_image.sh server
 
 test_server:
-	@${PWD}/bin/run_tests.sh server
+	@${PWD}/bin/run_tests.sh server $(tid)
 
 metrics_test_server:
 	@${PWD}/bin/check_test_metrics.sh server
@@ -20,7 +20,7 @@ image_client:
 	@${PWD}/bin/build_image.sh client
 
 test_client:
-	@${PWD}/bin/run_tests.sh client
+	@${PWD}/bin/run_tests.sh client $(tid)
 
 metrics_test_client:
 	@${PWD}/bin/check_test_metrics.sh client
