@@ -503,9 +503,20 @@ B1: insert the spooler as a transparent pass-through proxy.
   `CYBER_DOJO_SAVER_HOSTNAME`/`CYBER_DOJO_SAVER_PORT`, as web's client already does.
   Non-event writes (`kata_create`, forks, `kata_option_set`, group ops) are not
   routed through the spooler; like reads they stay direct web->saver. Server-side
-  tests mirror saver's harness and stub the http seam. NOT yet done: repointing
-  web's `saver_service.rb` (web-side), and the spooler's EBS host_path volume and
-  deployment terraform (section 8) - so nothing yet sends live traffic through it.
+  tests mirror saver's harness and stub the http seam. The image now builds with
+  the `sqlite3` gem (see B2), and the spooler has its `deployment/terraform`,
+  limited so far to the ECR repository (`ecr.tf` and its org pull policy, plus
+  main/data/versions/variables and the 244531986313 staging tfvars). That
+  repository is created out-of-band by a one-time, manually-run `bootstrap-ecr`
+  workflow that reuses `kosli-dev/tf`'s `apply.yml`, because `build-image` pushes
+  the image before `deploy-to-beta` would otherwise create the repository. CI can
+  now authenticate to AWS via OIDC: cyber-dojo enabled GitHub's immutable subject
+  claims, so this new repo's token subject is `repo:cyber-dojo@<org-id>/spooler@<repo-id>:*`,
+  and the `gh_actions_services` trust in `terraform-base-infra` was updated to
+  match. NOT yet done: the ECS service that runs the spooler with its EBS
+  host_path mount (section 8), deferred until that host volume exists, and
+  repointing web's `saver_service.rb` (web-side) - so nothing yet sends live
+  traffic through it.
 
 B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   The spooler persists each write to its WAL log before forwarding, still
@@ -515,6 +526,15 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   unchanged; the
   buffer now exists and a crash replays un-acked forwards. Deploy the spooler side
   (accept) before the web side (send).
+  DONE (spooler, groundwork only): the storage substrate this step needs is in
+  place. The `sqlite3` gem is installed in the image (Alpine has no prebuilt gem,
+  so it compiles its vendored SQLite amalgamation statically: the build toolchain
+  goes in as a virtual apk package and is dropped again, leaving only libgcc at
+  runtime), and `up.sh` checks and prepares a dedicated `/sqlite` volume - separate
+  from saver's `/cyber-dojo` - refusing to start unless it is mounted and writable
+  by the spooler user. The durable-intake logic itself (WAL persist-before-forward,
+  the `(laptop_id, tab_id, client_seq)` schema, and accepting `client_seq`) is not
+  yet written.
 
 B3: durable async via the spooler.
   ITE writes become fire-and-forget to the spooler's durable append; the spooler
