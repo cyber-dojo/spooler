@@ -1,6 +1,24 @@
 
 services:
 
+  client:
+    platform: linux/amd64
+    depends_on: [ server ]
+    build:
+      context: source/client
+      args:
+        - COMMIT_SHA
+    image: ${CYBER_DOJO_SPOOLER_CLIENT_IMAGE}:${CYBER_DOJO_SPOOLER_TAG}
+    user: ${CYBER_DOJO_SPOOLER_CLIENT_USER}
+    env_file: [ .env ]
+    read_only: true
+    restart: no
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./source/client:/spooler/source:ro
+      - ./test/client:/spooler/test:ro
+
   server:
     platform: linux/amd64
     build:

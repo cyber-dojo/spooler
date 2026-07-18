@@ -1,0 +1,2 @@
+# The client build context is source/client (see docker-compose.yml); the
+# Dockerfile copies all of it, so nothing needs excluding here.

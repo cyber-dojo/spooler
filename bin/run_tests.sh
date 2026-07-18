@@ -14,15 +14,16 @@ show_help()
     local -r MY_NAME=$(basename "${BASH_SOURCE[0]}")
     cat <<- EOF
 
-    Use: ${MY_NAME} {server} [ID...]
+    Use: ${MY_NAME} {server|client} [ID...]
 
     Options:
       -h      Show this help
       server  Run the server tests inside the server container
+      client  Run the client (integration) tests inside the client container
       ID...   Only run tests whose id58 matches these identifiers
 
     Example:
-      ${MY_NAME} server
+      ${MY_NAME} client
 
 EOF
 }
@@ -38,14 +39,18 @@ check_args()
       export TYPE=server
       export USER="${CYBER_DOJO_SPOOLER_SERVER_USER}"
       ;;
+    'client')
+      export TYPE=client
+      export USER="${CYBER_DOJO_SPOOLER_CLIENT_USER}"
+      ;;
     '')
       show_help
-      stderr "no argument - must be 'server'"
+      stderr "no argument - must be 'client' or 'server'"
       exit_non_zero
       ;;
     *)
       show_help
-      stderr "argument is '${1:-}' - must be 'server'"
+      stderr "argument is '${1:-}' - must be 'client' or 'server'"
       exit_non_zero
   esac
 }

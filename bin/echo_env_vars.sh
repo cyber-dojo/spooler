@@ -17,10 +17,13 @@ echo_env_vars()
   {
     echo "# This file is generated in bin/echo_env_vars.sh echo_env_vars()"
     echo "CYBER_DOJO_SPOOLER_PORT=4539"
+    echo "CYBER_DOJO_SPOOLER_CLIENT_PORT=4538"
     docker run --rm cyberdojo/versioner 2> /dev/null | grep PORT
   } > "${ROOT_DIR}/.env"
 
   echo CYBER_DOJO_SPOOLER_SERVER_USER=spooler
+  echo CYBER_DOJO_SPOOLER_CLIENT_USER=nobody
+  echo CYBER_DOJO_SPOOLER_CLIENT_IMAGE=cyberdojo/spooler-client
 
   # This repo overrides
   local -r AWS_ACCOUNT_ID=244531986313

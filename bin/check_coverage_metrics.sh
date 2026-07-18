@@ -11,15 +11,15 @@ show_help()
     local -r MY_NAME=$(basename "${BASH_SOURCE[0]}")
     cat <<- EOF
 
-    Use: ${MY_NAME} {server}
+    Use: ${MY_NAME} {server|client}
 
     Options:
       -h    Show this help
 
-    Check test coverage metrics for tests run from inside the server container.
+    Check test coverage metrics for tests run from inside the server|client container.
 
     Example:
-      ${MY_NAME} server
+      ${MY_NAME} client
 
 EOF
 }
@@ -31,16 +31,16 @@ check_args()
       show_help
       exit 0
       ;;
-    'server')
+    'server' | 'client')
       ;;
     '')
       show_help
-      stderr "no argument - must be 'server'"
+      stderr "no argument - must be 'client' or 'server'"
       exit_non_zero
       ;;
     *)
       show_help
-      stderr "argument is '${1:-}' - must be 'server'"
+      stderr "argument is '${1:-}' - must be 'client' or 'server'"
       exit_non_zero
   esac
 }

@@ -381,6 +381,9 @@ A1 (web): read-side detection poll, additive.
   read side before any later step depends on it. This is the interim
   laptop-granularity form; the full stale-tab lock of section 5 needs `tab_id` to
   recognise a tab's own writes, so it lands once `tab_id` flows (B2).
+  DONE (web): the read poll flags `mobbing?` on seeing a foreign `laptop_id`, and
+  saver keeps its write-time reject so the two agree. This is the interim
+  laptop-granularity form; the section-5 stale-tab lock waits on `tab_id` (B2).
 
 A2 (web): resolve navigation targets from read data.
   revert already scans read events for the previous light but seeds the scan from
@@ -391,6 +394,11 @@ A2 (web): resolve navigation targets from read data.
   list (`poly_filler.rb` `is_light?`) agree today but would silently drift if a
   colour were added. Behavior-neutral; severs revert's last use of the flat client
   index.
+  DONE (web): revert finds the previous light by `major` over the read events (no
+  longer seeded from `index - 2`); checkout and diff already resolve from read data.
+  The light predicate is unified, so web and saver no longer risk drifting if a
+  colour is added. Behavior-neutral; revert's last use of the flat client index is
+  severed.
 
 A3 (saver): make the client `index` optional and unused.
   With detection on the read side (A1), saver's write-time `index .. head` check is
