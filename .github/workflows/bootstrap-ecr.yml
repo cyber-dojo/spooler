@@ -1,0 +1,34 @@
+name: ▶️ Bootstrap ECR repository (one-time)
+
+# Manually-run, one-time workflow that creates the spooler ECR repository in the
+# staging/beta account (244531986313) before the first CI image push.
+#
+# The normal build-image job pushes the image to ECR, but it runs before
+# deploy-to-beta (which is what applies deployment/terraform and would create the
+# repository). On a brand-new service the repository does not exist yet, so that
+# first push fails. Run this workflow once from the Actions tab to create the
+# repository; from then on deploy-to-beta manages it and this workflow is no
+# longer needed.
+#
+# It reuses the same kosli-dev/tf apply.yml as deploy-to-beta and applies the
+# same deployment/terraform. That directory currently defines only the ECR
+# repository (the ECS service and its /sqlite volume are added once the backing
+# EBS host_path exists), so this apply creates only the repository.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap-ecr:
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: read
+    uses: kosli-dev/tf/.github/workflows/apply.yml@main
+    with:
+      aws_region: eu-central-1
+      aws_role_arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID_BETA }}:role/gh_actions_services
+      environment: beta
+      working_directory: deployment/terraform/
+      tf_version: v1.14.9
+      ref: ${{ github.sha }}
