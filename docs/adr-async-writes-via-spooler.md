@@ -345,8 +345,11 @@ noted inline; it is not a reason to combine them into one deploy.
 
 The sequence has two parts. Part A reaches asynchronous web->saver writes using
 ONLY web and saver (no new service). Part B introduces the spooler to make those
-writes durable and ordered. Throughout, READS stay direct web->saver via committed
-git; nginx and the other services are untouched.
+writes durable and ordered. A short Bridge between them establishes the
+`(laptop_id, tab_id, client_seq)` idempotency key end-to-end (web + saver, still
+no new service), pulling saver's dedup EXPAND forward so B4 becomes pure
+contraction. Throughout, READS stay direct web->saver via committed git; nginx and
+the other services are untouched.
 
 Two facts from the code (`saver/source/server/model/kata_v2.rb`) shape Part A:
 
@@ -483,6 +486,34 @@ At the end of Part A (through A6) web owns `major`, the client `index` is gone f
 the write path, and detection is read-side - all with no new service. A7 buys
 best-effort async; durable, ordered async is Part B.
 
+### Bridge - establish the client_seq idempotency key (web + saver, no spooler)
+
+The idempotency key `(laptop_id, tab_id, client_seq)` (sections 3, 7) can be put
+end-to-end BEFORE the spooler is in the path, because saver already stores
+`laptop_id` and `tab_id` (concatenated into the single per-event id, section 5) and
+only lacks `client_seq`. Landing the key here de-risks saver's contract change and
+soaks web's stamping in production ahead of the spooler. It is the EXPAND half of
+B4 pulled forward, leaving B4 as pure contraction. Reads stay direct web->saver.
+
+A8 (saver): accept an optional `client_seq` and dedup on the full key.
+  saver takes an optional `client_seq` argument (default, so old callers and the
+  current path still work - mirroring A3's optional-first discipline) and adds an
+  additive guard: a write whose `(laptop_id, tab_id, client_seq)` is already
+  committed is a no-op. The guard COMPOSES with saver's existing `update-ref`
+  compare-and-swap; the CAS is NOT removed here (web still writes directly, so many
+  tabs append concurrently and saver still needs it). Placement stays `head + 1`;
+  `client_seq` is an opaque dedup token saver only compares, never a position - it
+  is not the old flat `index` A6 removed. Strictly additive. Deploy before A9.
+
+A9 (web): stamp `tab_id` + monotonic `client_seq` and send it, synchronously.
+  web generates a per-tab `tab_id` and that tab's monotonic `client_seq`, and
+  includes `client_seq` in its write POSTs on the EXISTING direct-to-saver path.
+  (This also introduces the `tab_id` the section-5 read-side stale-tab lock wants.)
+  Writes stay SYNCHRONOUS - reorder protection is the spooler's job (B3), so going
+  fire-and-forget now would let reordered direct writes regress file state. Direct
+  to saver the A8 dedup catches only web's own re-fires (a modest win); the larger
+  payoff, deduping spooler redelivery, is latent until Part B. (Depends on A8.)
+
 ### Part B - the spooler (durable, ordered)
 
 B1: insert the spooler as a transparent pass-through proxy.
@@ -523,12 +554,13 @@ B1: insert the spooler as a transparent pass-through proxy.
 
 B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   The spooler persists each write to its WAL log before forwarding, still
-  synchronously returning saver's response. Introduce `(laptop_id, tab_id, client_seq)`:
-  the spooler accepts an optional `client_seq` (ignored if absent), then web stamps
-  each event with its `tab_id` and that tab's monotonic `client_seq`. Behavior
-  unchanged; the
-  buffer now exists and a crash replays un-acked forwards. Deploy the spooler side
-  (accept) before the web side (send).
+  synchronously returning saver's response. The `(laptop_id, tab_id, client_seq)`
+  key is already end-to-end from the Bridge (A8/A9), so here the spooler stores the
+  arriving `client_seq` as its ordering/idempotency column. When web is repointed to
+  the spooler (B1b) the spooler must FORWARD `client_seq` to saver, flipping the
+  interim B1 strip, so saver's A8 dedup keeps receiving the key; the repoint is
+  gated on that flip. Behavior unchanged; the buffer now exists and a crash replays
+  un-acked forwards.
   DONE (spooler, groundwork only): the storage substrate this step needs is in
   place. The `sqlite3` gem is installed in the image (Alpine has no prebuilt gem,
   so it compiles its vendored SQLite amalgamation statically: the build toolchain
@@ -556,13 +588,46 @@ B3: durable async via the spooler.
   proven).
 
 B4: simplify saver to an idempotent append (contract).
-  With the spooler the single ordered writer and idempotency by
-  `(laptop_id, tab_id, client_seq)`, saver's `update-ref` compare-and-swap retry, self-lag
-  re-append, and loser-rescue have nothing to do; saver contracts to an idempotent
-  append, the poll reading the committed stream (each event's `laptop_id` and
-  `tab_id`) to decide staleness itself. Add the dedup before removing the reject
-  path, so no window double-appends or falsely refuses. Deploy last, after the
-  spooler is proven.
+  The dedup guard already exists from A8; with the spooler now the single ordered
+  writer, saver's `update-ref` compare-and-swap retry, self-lag re-append, and
+  loser-rescue have nothing left to do and are REMOVED, leaving an idempotent
+  append. The poll reads the committed stream (each event's `laptop_id` and
+  `tab_id`) to decide staleness itself. This is the CONTRACT half whose EXPAND was
+  pulled forward to A8; keep the dedup in place while removing the reject path, so
+  no window double-appends or falsely refuses. Deploy last, after the spooler is
+  proven.
+
+## Drainer parameter values
+
+Both knobs below bound the queue dwell (t1 enqueue to t2 forward) and are sized
+against the ~5s read eventual-consistency budget. They are injected config; the
+values here are the defaults. The dominant scenario that sets the budget is a
+group kata: many participants write events for ~30 min then stop, after which a
+dashboard session reads from saver (an instructor often also watches the
+dashboard live during the active window, which is what motivates the freshness
+and anomaly API below).
+
+Decided:
+
+- backoff-cap = 10s. When a forward to saver fails, the drainer retries with
+  exponential backoff capped at 10s, indefinitely (a queued write, especially a
+  sync-acked test event, is never dropped). The cap bounds the post-recovery
+  pickup delay: once saver is healthy again a held row drains within one cap
+  interval. A long outage therefore blows the 5s FRESHNESS budget (a reader
+  briefly sees stale state) but never loses the write - freshness is bounded by
+  the budget, durability is unconditional.
+- skip-timeout = 5s. The reorder buffer holds an out-of-order event waiting for a
+  missing `client_seq`; if the gap has not filled within 5s the drainer releases
+  past it. Out-of-order arrivals are expected to be rare, and waiting 5s for that
+  rare case is acceptable. The skip only ever discards an ITE (a test event is
+  sync-acked, so it can never be the missing seq) and a dropped ITE is harmless
+  because the next event's cumulative file set supersedes it.
+
+Recommended but not yet pinned (finer mechanics of the same two knobs): the
+backoff base and growth (e.g. ~200ms doubling) and jitter; and treating a
+genuine 4xx contract error as park/dead-letter rather than retry-forever, so one
+poison row cannot wedge the ordered channel while transient 5xx/timeout/
+connection-refused failures still retry.
 
 ## Open questions
 
@@ -574,3 +639,40 @@ B4: simplify saver to an idempotent append (contract).
 - Whether the spooler should return a synchronous staleness verdict for test
   events (a cheap head check on the sync-acked path), restoring instant
   test-time detection while ITEs stay read-side.
+
+## Future work: a freshness and anomaly API
+
+Not part of the write path; a deferred, additive read-only endpoint (per
+kata-id) that the dashboard can poll quietly. It is safe to add after the
+spooler is proven because it cannot affect ordering, the eventual-consistency
+budget, or correctness: it only observes.
+
+The governing constraint is what makes this the spooler's job rather than
+saver's. The spooler holds only the LIVE EDGE: undrained plus very recently
+acked rows, deleted after ack. It is therefore a freshness/anomaly lens, NOT an
+analytics store. The full history (every committed light over the session) is
+saver's committed stream, which the dashboard already reads. The two are
+complementary: saver answers "what happened", the spooler answers "how current
+is what I am seeing, and is anything stuck".
+
+Freshness (per kata-id):
+
+- backlog depth: rows queued but not yet acked by saver.
+- drain lag: age of the oldest undrained row (t1 to now).
+- drainer-in-backoff: whether saver is currently unreachable (the drainer is
+  retrying under the backoff-cap).
+
+Anomalies (things only the spooler can see, because it is the single ordered
+choke point):
+
+- events currently held in the reorder buffer (out of order right now).
+- count of skipped (lost) ITEs.
+
+The single win: it lets a dashboard distinguish "the room went quiet" from "the
+pipe is backed up". Watching saver alone, an instructor sees "no new lights" and
+cannot tell whether the group stopped working or saver is lagging behind a
+healthy spooler backlog. The freshness numbers answer that directly.
+
+Per-participant liveness (a roster of active (laptop_id, tab_id) with last-write
+heartbeats) was considered and set aside: it needs richer dashboard UI and is
+not the value here. Freshness and anomalies are.
