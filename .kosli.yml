@@ -1,0 +1,34 @@
+version: 1
+
+trail:
+  attestations:
+    - name: pull-request
+      type: pull_request
+  artifacts:
+    - name: spooler
+      attestations:
+        - name: provenance-facts
+          type: custom:provenance-facts
+        - name: provenance-decision
+          type: decision
+
+        - name: sbom-facts
+          type: custom:sbom-facts
+        - name: sbom-decision
+          type: decision
+
+        - name: snyk-container-scan
+          type: decision
+
+        - name: unit-test
+          type: junit
+        - name: unit-test-metrics
+          type: custom:test-metrics
+        - name: unit-test-coverage-metrics
+          type: custom:coverage-metrics
+        - name: integration-test
+          type: junit
+        - name: integration-test-metrics
+          type: custom:test-metrics
+        - name: integration-test-coverage-metrics
+          type: custom:coverage-metrics
