@@ -31,6 +31,7 @@ services:
     read_only: true
     restart: no
     tmpfs:
+      - /sqlite:uid=19664,gid=65533
       - /tmp
     volumes:
       - ./source/server:/spooler/source:ro

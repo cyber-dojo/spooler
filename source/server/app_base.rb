@@ -53,9 +53,10 @@ class AppBase < Sinatra::Base
   def self.post_pass_through(path)
     # Register a POST route that relays the request to saver and returns
     # saver's response verbatim: status (including a non-2xx such as 500),
-    # content-type, and body. Pure relay, no state (ADR B1).
+    # content-type, and body. The spooler-only client_seq is dropped from the
+    # body first; every other field reaches saver unchanged.
     post "/#{path}" do
-      relayed = @externals.saver.forward(path.to_s, request_body)
+      relayed = @externals.saver.forward(path.to_s, without_client_seq(request_body))
       status(relayed.code.to_i)
       headers['Content-Type'] = relayed.content_type || 'application/json'
       body(relayed.body)
@@ -134,6 +135,15 @@ class AppBase < Sinatra::Base
     # Read the full request body from the start.
     request.body.rewind
     request.body.read
+  end
+
+  def without_client_seq(body)
+    # client_seq is the browser's per-tab ordering key (laptop_id, tab_id,
+    # client_seq) that the spooler owns; saver's write contract has no such
+    # field, so strip it before forwarding and return the remaining JSON.
+    event = json_parse(body)
+    event.delete('client_seq')
+    json_plain(event)
   end
 
 end

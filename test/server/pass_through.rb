@@ -14,7 +14,8 @@ class PassThroughTest < TestBase
   end
 
   test 'Pt0002', %w(
-  | the request path and body are forwarded to saver byte-for-byte
+  | the request is forwarded to saver's same-named path, and a body carrying
+  | no client_seq reaches saver with its fields unchanged
   ) do
     stub = saver_returns(200, ran_tests_result)
     body = ran_tests_body
@@ -22,7 +23,7 @@ class PassThroughTest < TestBase
     assert_equal 1, stub.forwarded.size
     request = stub.forwarded[0]
     assert_equal '/kata_ran_tests', request.path
-    assert_equal body, request.body
+    assert_equal JSON.parse(body), JSON.parse(request.body)
   end
 
   test 'Pt0003', %w(
@@ -42,6 +43,29 @@ class PassThroughTest < TestBase
     write_paths.each { |path| post_json("/#{path}", '{}') }
     forwarded = stub.forwarded.map { |request| request.path }
     assert_equal write_paths.map { |path| "/#{path}" }, forwarded
+  end
+
+  test 'Pt0005', %w(
+  | client_seq is a spooler-only ordering field: it is dropped from the write
+  | body before forwarding to saver, and every other field is forwarded intact
+  ) do
+    stub = saver_returns(200, ran_tests_result)
+    sent = {
+      id: 'AbCd3E',
+      files: { 'hiker.rb' => 'content' },
+      stdout: { 'content' => 'out', 'truncated' => false },
+      stderr: { 'content' => '',    'truncated' => false },
+      status: '0',
+      summary: 'red',
+      laptop_id: laptop_id,
+      client_seq: 42
+    }
+    post_json('/kata_ran_tests', sent.to_json)
+    forwarded = JSON.parse(stub.forwarded[0].body)
+    refute forwarded.key?('client_seq'), 'client_seq must not reach saver'
+    expected = JSON.parse(sent.to_json)
+    expected.delete('client_seq')
+    assert_equal expected, forwarded
   end
 
   private

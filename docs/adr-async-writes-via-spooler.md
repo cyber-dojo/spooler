@@ -497,9 +497,12 @@ B1: insert the spooler as a transparent pass-through proxy.
   Rack app: `App` routing table, `AppBase`, `Externals`, `Prober`) and builds to
   an image with working alive/ready probes (section 9). The nine event writes
   (`kata_file_create` ... `kata_checked_out`) are exposed by a `post_pass_through`
-  route macro and relayed to saver verbatim - status, content-type, and body,
-  including a 500 - by `External::Saver` over the injectable `Externals#http` seam
-  (`HttpJson::Requester`); pure relay, no state. saver is located by
+  route macro; each request is forwarded to saver by `External::Saver` over the
+  injectable `Externals#http` seam (`HttpJson::Requester`), and saver's response is
+  relayed back verbatim - status, content-type, and body, including a 500. No state
+  is persisted. The forwarded request body has the spooler-owned `client_seq`
+  stripped first (the first slice of B2 below); every other field reaches saver
+  unchanged. saver is located by
   `CYBER_DOJO_SAVER_HOSTNAME`/`CYBER_DOJO_SAVER_PORT`, as web's client already does.
   Non-event writes (`kata_create`, forks, `kata_option_set`, group ops) are not
   routed through the spooler; like reads they stay direct web->saver. Server-side
@@ -532,8 +535,13 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   goes in as a virtual apk package and is dropped again, leaving only libgcc at
   runtime), and `up.sh` checks and prepares a dedicated `/sqlite` volume - separate
   from saver's `/cyber-dojo` - refusing to start unless it is mounted and writable
-  by the spooler user. The durable-intake logic itself (WAL persist-before-forward,
-  the `(laptop_id, tab_id, client_seq)` schema, and accepting `client_seq`) is not
+  by the spooler user (the test `docker-compose.yml` mounts `/sqlite` as a tmpfs
+  owned by the spooler uid, mirroring saver's owned-tmpfs `/cyber-dojo`, so the
+  container boots for the test run). The spooler already accepts `client_seq` on
+  every write and strips it before forwarding to saver (saver's write contract has
+  no such field), so the field is on the wire and off saver's input; it is not yet
+  used for ordering. The rest of the durable-intake logic (WAL
+  persist-before-forward and the `(laptop_id, tab_id, client_seq)` schema) is not
   yet written.
 
 B3: durable async via the spooler.
