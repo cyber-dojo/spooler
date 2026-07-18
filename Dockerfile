@@ -2,6 +2,18 @@ FROM ghcr.io/cyber-dojo/sinatra-base:1a1d65f@sha256:31bfb1e5cbc25d4b37e0dfea2e46
 # The FROM statement above is typically set via an automated pull-request from the sinatra-base repo
 LABEL maintainer=jon@jaggersoft.com
 
+# The spooler persists its buffer in an embedded SQLite database (ADR section 7),
+# reached via the sqlite3 gem. On Alpine (musl) there is no precompiled gem, so
+# the gem compiles its vendored SQLite amalgamation statically into the native
+# extension. The build toolchain is only needed to compile it: install as a
+# virtual package, build, then drop it. Re-add libgcc for the libgcc_s the
+# compiled extension links at runtime (the other libs it needs are provided by
+# ruby).
+RUN apk add --no-cache --virtual .sqlite3-build-deps build-base \
+ && gem install sqlite3 \
+ && apk del .sqlite3-build-deps \
+ && apk add --no-cache libgcc
+
 ARG COMMIT_SHA
 ENV COMMIT_SHA=${COMMIT_SHA}
 
