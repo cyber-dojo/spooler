@@ -1,8 +1,16 @@
 require 'net/http'
+require_relative 'external/db'
 require_relative 'external/saver'
 require_relative 'prober'
+require_relative 'spool'
 
 class Externals
+
+  def db
+    # The durable on-disk buffer (SQLite) each write is persisted to before
+    # being forwarded to saver. Its file lives on the mounted /sqlite volume.
+    @db ||= External::Db.new('/sqlite/spooler.db')
+  end
 
   def http
     # The HTTP transport class injected into downstream clients. Defaulting
@@ -17,8 +25,13 @@ class Externals
   end
 
   def saver
-    # The saver service this pass-through relays write events to (ADR B1).
+    # The saver service each buffered write is forwarded to.
     @saver ||= External::Saver.new(self)
+  end
+
+  def spool
+    # The model that persists each write to the buffer and forwards it to saver.
+    @spool ||= Spool.new(self)
   end
 
 end

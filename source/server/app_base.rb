@@ -51,12 +51,13 @@ class AppBase < Sinatra::Base
   # - - - - - - - - - - - - - - - - - - - - - -
 
   def self.post_pass_through(path)
-    # Register a POST route that relays the request to saver and returns
-    # saver's response verbatim: status (including a non-2xx such as 500),
-    # content-type, and body. The request body (including the tab_seq ordering
-    # field) is forwarded byte-for-byte; saver owns the write contract.
+    # Register a POST route that persists the write to the durable buffer, then
+    # forwards it to saver and returns saver's response verbatim: status
+    # (including a non-2xx such as 500), content-type, and body. The request
+    # body (including the tab_seq ordering field) is forwarded byte-for-byte;
+    # saver owns the write contract.
     post "/#{path}" do
-      relayed = @externals.saver.forward(path.to_s, request_body)
+      relayed = @externals.spool.write(path.to_s, request_body)
       status(relayed.code.to_i)
       headers['Content-Type'] = relayed.content_type || 'application/json'
       body(relayed.body)

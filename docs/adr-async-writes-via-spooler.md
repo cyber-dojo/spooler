@@ -504,6 +504,20 @@ A8 (saver): accept an optional `tab_seq` and dedup on the full key.
   tabs append concurrently and saver still needs it). Placement stays `head + 1`;
   `tab_seq` is an opaque dedup token saver only compares, never a position - it
   is not the old flat `index` A6 removed. Strictly additive. Deploy before A9.
+  DONE (saver): every write method takes an optional `tab_seq` (default nil) - the
+  dispatch (`model.rb`) and the internal chain (`kata_v0/v1/v2`) - so a caller that
+  omits it still works. `commit_event` deduplicates: a write whose key is already
+  committed returns the committed events unchanged (a no-op reporting the original
+  position). The stored key is `(laptop_id, tab_seq, colour)`, which is the ADR's
+  `(laptop_id, tab_id, tab_seq)` seen from saver - the browser's `tab_id` is folded
+  into the single stored `laptop_id` (section 5) - plus `colour`. `colour` is in the
+  key because one incoming write expands into two commits sharing one `tab_seq` (the
+  implicit underneath `file_edit` and the real event); their differing colours stop
+  the real event deduping against its own sibling on first delivery. The guard
+  composes with the existing `update-ref` compare-and-swap, which is NOT removed (web
+  still writes directly, so concurrent tabs still need it - that removal is B4).
+  Placement stays `head + 1`; `tab_seq` is stored only so a later redelivery is
+  recognised, never used as a position.
 
 A9 (web): stamp `tab_id` + monotonic `tab_seq` and send it, synchronously.
   web generates a per-tab `tab_id` and that tab's monotonic `tab_seq`, and
@@ -513,6 +527,17 @@ A9 (web): stamp `tab_id` + monotonic `tab_seq` and send it, synchronously.
   fire-and-forget now would let reordered direct writes regress file state. Direct
   to saver the A8 dedup catches only web's own re-fires (a modest win); the larger
   payoff, deduping spooler redelivery, is latent until Part B. (Depends on A8.)
+  DONE (web): the browser owns a per-tab monotonic `tabSeq` (`_tab_seq.erb`),
+  advanced once per write POST by `nextTabSeq` - not per committed event, so a
+  `[test]` that commits two saver events (the underneath `file_edit` plus the light)
+  is one POST carrying one `tab_seq`, matching saver's colour-keyed dedup (A8). The
+  write POSTs send `tab_seq`: run_tests (`_run_tests.erb`), the file ITEs
+  (`_file_inter_test_events.erb`), and checkout (`_checkout_button.erb`), and
+  `saver_service.rb` forwards it on all nine write methods. `tab_id` itself already
+  landed with the section-5 stale-tab lock (`cd.mobbingPoll.tabId` from
+  `generateTabId`); the poll reads a committed event's tab_id as `laptop_id.slice(32)`,
+  i.e. the browser folds `tab_id` into the stored `laptop_id`. Writes stay
+  SYNCHRONOUS on the direct-to-saver path; fire-and-forget is A7/B3.
 
 ### Part B - the spooler (durable, ordered)
 
@@ -573,6 +598,87 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   persist or use it for ordering. The rest of the durable-intake logic (WAL
   persist-before-forward and the `(laptop_id, tab_id, tab_seq)` schema) is not
   yet written.
+  PLAN (B2): the physical key. The spooler-bound write body carries no separate
+  `tab_id` field: web folds it into `laptop_id` before forwarding (`web app.rb`
+  `laptop_id` = `cookie[0,32] + tab_id`). So the conceptual `(laptop_id, tab_id,
+  tab_seq)` key maps to the physical columns `(kata_id, laptop_id, tab_seq)`, where
+  `laptop_id` already encodes `tab_id`. `colour` is NOT in the spooler key: saver
+  needs colour because one write expands into two commits sharing a `tab_seq`, but
+  the spooler's unit is the POST, and there is exactly one POST per `tab_seq`.
+  PLAN (B2): removal is delete-on-ack. A buffered row is DELETED the moment saver
+  acks it (2xx), so presence in the buffer means "undrained" and there is no
+  `acked` column. This bounds the buffer to the live edge (matching the freshness
+  note's "deleted after ack") and makes boot replay simply "re-forward every
+  remaining row". A write saver rejects with 500 stays in the buffer (undrained);
+  under B2 it is re-forwarded only on boot replay, while continuous
+  retry-with-backoff of a stuck row is the B3 drainer, not B2.
+  PLAN (B2): steps, each red-test first, behaviour staying synchronous throughout
+  (no reorder buffer, skip-timeout, fire-and-forget, or background drainer - those
+  are B3). B2 only inserts a durable buffer plus crash replay beneath the existing
+  verbatim relay.
+    1. DB seam. Add an `External::Db` that opens the SQLite database on the
+       `/sqlite` volume, sets WAL mode, and creates the `events` table if absent.
+       Wire it into `Externals` behind an injectable path (mirroring the `http`
+       seam) so tests open a temp or `:memory:` database.
+    2. Persist-before-forward. A new `Spool` model inserts the row, THEN calls
+       `saver.forward`, THEN DELETES the row on a 2xx (it is drained); the route
+       macro calls `spool` instead of `saver` directly. saver's response is still
+       relayed verbatim (the existing pass-through tests stay green).
+    3. Persist survives a saver failure. When saver returns 500 the row stays in
+       the buffer (undrained) and the 500 is still relayed verbatim.
+    4. Idempotency column. Extract `kata_id`, `laptop_id`, `tab_seq` into columns
+       under `UNIQUE(kata_id, laptop_id, tab_seq)`, inserting with `INSERT OR
+       IGNORE`, so a redelivered write still in the buffer is a single row (a write
+       already drained-and-deleted is instead deduped at saver by its A8 key).
+    5. Boot replay. On startup the spooler re-forwards every row still in the
+       buffer to saver (idempotent via saver's A8 dedup) and deletes each on a 2xx -
+       this is the "a crash replays un-drained forwards" guarantee.
+  DONE (spooler, steps 1-3 plus refinements): the durable buffer exists, every
+  write is persisted before being forwarded, and a row is drained on ack.
+  - DB seam (step 1). `External::Db` opens the SQLite database (default
+    `/sqlite/spooler.db`), sets `PRAGMA journal_mode=WAL`, and creates the `events`
+    table. It is wired into `Externals` behind an injectable seam (tests set the
+    memoized `@db` via `instance_exec`, saver's house idiom) so a test can open a
+    temp or in-memory database.
+  - Persist-before-forward and delete-on-ack (steps 2 and 3). A `Spool` model
+    persists the write (`Db#append` returns the row id), forwards it to saver, and
+    on a 2xx deletes the row (`Db#delete`) so only undrained writes remain; a
+    non-2xx (e.g. 500) leaves the row buffered for a later re-forward. saver's
+    response is relayed verbatim, and the `post_pass_through` macro now routes
+    through `spool`, not `saver` directly. There is no `acked` column: presence in
+    the buffer is what "undrained" means. The existing pass-through relay tests
+    stay green.
+  - busy_timeout. `External::Db` sets `PRAGMA busy_timeout=5000`. This is a genuine
+    production setting, not a test scaffold: puma runs `workers Etc.nprocessors`, so
+    one task has several worker PROCESSES each holding its own connection to the one
+    file, and the blue-green overlap briefly adds a second task's connection. WAL
+    serialises writers; busy_timeout makes a colliding writer wait rather than error
+    SQLITE_BUSY - exactly the "second writer blocks" behaviour section 8 relies on.
+  - Buffer scoped per kata. The `events` table carries a `kata_id` column and the
+    reads are kata-scoped (`event_count(kata_id:)`, `events_for(kata_id:)`) because
+    each kata is its own ordered log (the drainer will order per kata). `Spool`
+    reads the kata id from the JSON body's `id`. This pulls the kata_id part of the
+    step-4 key forward.
+  - Non-JSON reject. A write whose body is not JSON is refused at intake with 400
+    (`Spool` raises `RequestError`) and is neither persisted nor forwarded: an
+    unparseable request can never become a valid saver write, so buffering it would
+    leave a poison row that never drains (saver would 400 it anyway).
+  - synchronous left at the SQLite default (FULL). A laptop benchmark put FULL's
+    fsync-bound ceiling at ~13k-24k single-row commits/sec (NORMAL ~3-4x higher),
+    far above expected load; but the laptop overstates FULL (macOS `fsync` is not
+    the true barrier flush EBS does), and the single-volume fsync/IOPS rate, not the
+    write lock, is the real ceiling. NORMAL is left as a documented knob to revisit
+    against EBS if write throughput ever bites.
+  - Tests. `Db0001-0005` exercise the real SQLite Db (open, WAL, busy_timeout, an
+    append + kata-scoped read round-trip, and append/delete of a buffered row);
+    `Sp0001-0002` exercise `Spool` against a `DbAppendSpy` double (append recorded
+    on a valid write; no append and a 400 on a non-JSON body), and `Sp0003-0004`
+    against a real in-memory Db (a 2xx drains the row, a 500 leaves it buffered).
+    So the append/non-buffer assertions touch no real SQLite, while the drain
+    assertions observe real buffer state; the shared file stays out of the test path.
+  NOT yet done (rest of B2): the `laptop_id`/`tab_seq` columns and the
+  `UNIQUE(kata_id, laptop_id, tab_seq)` idempotency constraint (step 4); and boot
+  replay of the buffered rows on startup (step 5).
 
 B3: durable async via the spooler.
   ITE writes become fire-and-forget to the spooler's durable append; the spooler
