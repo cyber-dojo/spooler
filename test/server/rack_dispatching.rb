@@ -116,16 +116,4 @@ class RackDispatchingTest < TestBase
     assert exception.key?('time')
   end
 
-  # - - - - - - - - - - - - - - - - - - - - - - - - - -
-
-  def with_captured_stdout_stderr
-    captured_stdout = StringIO.new(+'', 'w')
-    old_stdout_stream = Thread.current[:stdout_stream]
-    Thread.current[:stdout_stream] = captured_stdout
-    response = yield
-    [response, captured_stdout.string, '']
-  ensure
-    Thread.current[:stdout_stream] = old_stdout_stream
-  end
-
 end

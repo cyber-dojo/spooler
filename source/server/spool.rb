@@ -14,10 +14,28 @@ class Spool
     # to saver, and delete it from the buffer once saver acks (delete-on-ack) so
     # only undrained writes remain. Return saver's raw response for verbatim
     # relay; a non-2xx leaves the row buffered for a later re-forward.
-    id = @externals.db.append(kata_id: kata_id_of(body), path: path, body: body)
+    fields = json_body(body)
+    id = @externals.db.append(
+      path:      path,
+      body:      body,
+      kata_id:   fields['id'],
+      laptop_id: fields['laptop_id'],
+      tab_seq:   fields['tab_seq']
+    )
     response = @externals.saver.forward(path, body)
     @externals.db.delete(id) if drained?(response)
     response
+  end
+
+  def replay
+    # Re-forward every buffered (undrained) write to saver, oldest first, and
+    # delete each one saver acks. Run once at startup so writes persisted but not
+    # yet drained before a crash or restart are recovered rather than lost; a
+    # redelivery is a no-op at saver via its idempotency key.
+    @externals.db.buffered_events.each do |event|
+      response = @externals.saver.forward(event['path'], event['body'])
+      @externals.db.delete(event['id']) if drained?(response)
+    end
   end
 
   private
@@ -27,13 +45,14 @@ class Spool
     (200..299).cover?(response.code.to_i)
   end
 
-  def kata_id_of(body)
-    # The kata a write belongs to, read from its JSON body's id field, so the
-    # buffer can be scoped per kata (each kata is its own ordered log). A body
-    # that is not JSON is rejected here with a 400 rather than buffered: an
-    # unparseable request can never become a valid saver write, so buffering it
-    # would leave a poison row that never drains (saver would 400 it anyway).
-    JSON.parse(body)['id']
+  def json_body(body)
+    # The write body parsed once, so the buffer can be keyed by its
+    # (id, laptop_id, tab_seq) idempotency fields (id is the kata id; each kata
+    # is its own ordered log). A body that is not JSON is rejected here with a
+    # 400 rather than buffered: an unparseable request can never become a valid
+    # saver write, so buffering it would leave a poison row that never drains
+    # (saver would 400 it anyway).
+    JSON.parse(body)
   rescue JSON::ParserError
     raise RequestError, 'body is not JSON'
   end

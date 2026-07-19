@@ -1,7 +1,5 @@
 require_relative 'test_base'
-require_relative 'doubles/saver_http_stub'
 require_relative 'doubles/db_append_spy'
-require_source 'external/db'
 
 class SpoolPersistTest < TestBase
 
@@ -15,7 +13,8 @@ class SpoolPersistTest < TestBase
     assert_equal 200, response.status
     assert_equal ran_tests_result, response.body
     assert_equal(
-      [{ kata_id: id58, path: 'kata_ran_tests', body: ran_tests_body }],
+      [{ path: 'kata_ran_tests', body: ran_tests_body,
+         kata_id: id58, laptop_id: laptop_id, tab_seq: 4 }],
       spy.appends
     )
   end
@@ -59,15 +58,19 @@ class SpoolPersistTest < TestBase
     assert_equal 1, db.buffered_events.size
   end
 
-  private
-
-  def in_memory_db
-    # Inject a real, isolated in-memory buffer so a test can observe what the
-    # real Spool drained or left behind, without touching the shared file.
-    db = External::Db.new(':memory:')
-    externals.instance_exec { @db = db }
-    db
+  test 'Sp0005', %w(
+  | a redelivered write (saver still down, so both stay buffered) is deduped to
+  | one row, because Spool passes its (kata_id, laptop_id, tab_seq) key from the
+  | body through to the buffer
+  ) do
+    db = in_memory_db
+    saver_returns(500, '{"exception":"saver down"}')
+    post_json('/kata_ran_tests', ran_tests_body)
+    post_json('/kata_ran_tests', ran_tests_body)
+    assert_equal 1, db.buffered_events.size
   end
+
+  private
 
   def db_append_spy
     # Replace the buffer with a spy so the test can assert what the real Spool
@@ -75,45 +78,6 @@ class SpoolPersistTest < TestBase
     spy = DbAppendSpy.new
     externals.instance_exec { @db = spy }
     spy
-  end
-
-  def with_captured_stdout_stderr
-    # Redirect the app's error-log stream so a rejected write's logged
-    # exception does not leak to the test runner's stdout.
-    captured_stdout = StringIO.new(+'', 'w')
-    old_stdout_stream = Thread.current[:stdout_stream]
-    Thread.current[:stdout_stream] = captured_stdout
-    response = yield
-    [response, captured_stdout.string, '']
-  ensure
-    Thread.current[:stdout_stream] = old_stdout_stream
-  end
-
-  def saver_returns(code, body)
-    # Inject a stub http transport so the write relays to a canned saver
-    # response instead of a real saver.
-    stub = SaverHttpStub.new(SaverResponseStub.new(code: code, body: body))
-    externals.instance_exec { @http = stub }
-    stub
-  end
-
-  def ran_tests_result
-    # A canned saver 200 body.
-    '{"kata_ran_tests":{"index":7}}'
-  end
-
-  def ran_tests_body
-    # A realistic kata_ran_tests write body, keyed to this test's own kata id
-    # (id58) so the recorded append is unambiguously this write's.
-    {
-      id: id58,
-      files: { 'hiker.rb' => 'content' },
-      stdout: { 'content' => 'out', 'truncated' => false },
-      stderr: { 'content' => '',    'truncated' => false },
-      status: '0',
-      summary: 'red',
-      laptop_id: laptop_id
-    }.to_json
   end
 
 end

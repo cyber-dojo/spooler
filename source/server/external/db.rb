@@ -16,24 +16,35 @@ module External
       @db.execute('PRAGMA busy_timeout=5000;')
       @db.execute(<<~SQL)
         CREATE TABLE IF NOT EXISTS events (
-          id      INTEGER PRIMARY KEY,
-          kata_id TEXT,
-          path    TEXT NOT NULL,
-          body    TEXT NOT NULL
+          id        INTEGER PRIMARY KEY,
+          kata_id   TEXT,
+          laptop_id TEXT,
+          tab_seq   INTEGER,
+          path      TEXT NOT NULL,
+          body      TEXT NOT NULL,
+          UNIQUE(kata_id, laptop_id, tab_seq)
         );
       SQL
     end
 
-    def append(kata_id:, path:, body:)
-      # Persist one write as a buffered event row and return its row id (kata_id
-      # is the kata the write belongs to, path is the write method name, body its
-      # verbatim request body). The buffer is scoped by kata_id: each kata is its
-      # own ordered log. A row stays buffered (undrained) until delete drains it.
-      @db.execute(
-        'INSERT INTO events (kata_id, path, body) VALUES (?, ?, ?);',
-        [kata_id, path, body]
-      )
-      @db.last_insert_row_id
+    def append(path:, body:, kata_id:, laptop_id:, tab_seq:)
+      # Persist one write as a buffered event row and return its row id. kata_id
+      # is the kata the write belongs to (each kata is its own ordered log); path
+      # is the write method name; body its verbatim request body. A row stays
+      # buffered (undrained) until delete drains it.
+      #
+      # (kata_id, laptop_id, tab_seq) is the idempotency key: a redelivered write
+      # still in the buffer is deduped to one row (a no-op UPSERT), and its
+      # original id is returned so the caller drains the right row. A write whose
+      # key has a nil part (no tab_seq) is not deduped - SQLite treats NULLs as
+      # distinct in the UNIQUE constraint - which is correct: it has no key.
+      rows = @db.execute(<<~SQL, [path, body, kata_id, laptop_id, tab_seq])
+        INSERT INTO events (path, body, kata_id, laptop_id, tab_seq)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(kata_id, laptop_id, tab_seq) DO UPDATE SET path = path
+        RETURNING id;
+      SQL
+      rows[0][0]
     end
 
     def delete(id)

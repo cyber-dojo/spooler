@@ -633,8 +633,9 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
     5. Boot replay. On startup the spooler re-forwards every row still in the
        buffer to saver (idempotent via saver's A8 dedup) and deletes each on a 2xx -
        this is the "a crash replays un-drained forwards" guarantee.
-  DONE (spooler, steps 1-3 plus refinements): the durable buffer exists, every
-  write is persisted before being forwarded, and a row is drained on ack.
+  DONE (spooler, steps 1-4 plus refinements): the durable buffer exists, every
+  write is persisted before being forwarded, a row is drained on ack, and a
+  redelivery still in the buffer is deduped.
   - DB seam (step 1). `External::Db` opens the SQLite database (default
     `/sqlite/spooler.db`), sets `PRAGMA journal_mode=WAL`, and creates the `events`
     table. It is wired into `Externals` behind an injectable seam (tests set the
@@ -657,8 +658,15 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   - Buffer scoped per kata. The `events` table carries a `kata_id` column and the
     reads are kata-scoped (`event_count(kata_id:)`, `events_for(kata_id:)`) because
     each kata is its own ordered log (the drainer will order per kata). `Spool`
-    reads the kata id from the JSON body's `id`. This pulls the kata_id part of the
-    step-4 key forward.
+    reads the kata id from the JSON body's `id`.
+  - Idempotency key (step 4). `events` also carries `laptop_id` and `tab_seq`
+    columns under `UNIQUE(kata_id, laptop_id, tab_seq)`, and `Spool` reads all
+    three from the body. `append` is an UPSERT (`ON CONFLICT ... DO UPDATE ...
+    RETURNING id`), so a redelivered write still in the buffer is deduped to one
+    row and its original id is returned (so the right row is drained). NULL key
+    parts stay distinct, so a write lacking a `tab_seq` is not deduped (it has no
+    key). A write already drained-and-deleted is instead deduped at saver by its
+    A8 key.
   - Non-JSON reject. A write whose body is not JSON is refused at intake with 400
     (`Spool` raises `RequestError`) and is neither persisted nor forwarded: an
     unparseable request can never become a valid saver write, so buffering it would
@@ -669,16 +677,15 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
     the true barrier flush EBS does), and the single-volume fsync/IOPS rate, not the
     write lock, is the real ceiling. NORMAL is left as a documented knob to revisit
     against EBS if write throughput ever bites.
-  - Tests. `Db0001-0005` exercise the real SQLite Db (open, WAL, busy_timeout, an
-    append + kata-scoped read round-trip, and append/delete of a buffered row);
-    `Sp0001-0002` exercise `Spool` against a `DbAppendSpy` double (append recorded
-    on a valid write; no append and a 400 on a non-JSON body), and `Sp0003-0004`
-    against a real in-memory Db (a 2xx drains the row, a 500 leaves it buffered).
-    So the append/non-buffer assertions touch no real SQLite, while the drain
+  - Tests. `Db0001-0006` exercise the real SQLite Db (open, WAL, busy_timeout, an
+    append + kata-scoped read round-trip, append/delete of a buffered row, and
+    dedup returning the original row's id); `Sp0001-0002` exercise `Spool` against a
+    `DbAppendSpy` double (append recorded on a valid write; no append and a 400 on a
+    non-JSON body), and `Sp0003-0005` against a real in-memory Db (a 2xx drains the
+    row, a 500 leaves it buffered, a redelivery is deduped to one row). So the
+    append/non-buffer assertions touch no real SQLite, while the drain/dedup
     assertions observe real buffer state; the shared file stays out of the test path.
-  NOT yet done (rest of B2): the `laptop_id`/`tab_seq` columns and the
-  `UNIQUE(kata_id, laptop_id, tab_seq)` idempotency constraint (step 4); and boot
-  replay of the buffered rows on startup (step 5).
+  NOT yet done (rest of B2): boot replay of the buffered rows on startup (step 5).
 
 B3: durable async via the spooler.
   ITE writes become fire-and-forget to the spooler's durable append; the spooler

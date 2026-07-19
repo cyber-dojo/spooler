@@ -1,5 +1,4 @@
 require_relative 'test_base'
-require_relative 'doubles/saver_http_stub'
 
 class PassThroughTest < TestBase
 
@@ -67,34 +66,12 @@ class PassThroughTest < TestBase
 
   private
 
-  def saver_returns(code, body)
-    stub = SaverHttpStub.new(SaverResponseStub.new(code: code, body: body))
-    externals.define_singleton_method(:http) { stub }
-    stub
-  end
-
   def write_paths
     %w(
       kata_file_create kata_file_delete kata_file_rename kata_file_edit
       kata_ran_tests kata_predicted_right kata_predicted_wrong
       kata_reverted kata_checked_out
     )
-  end
-
-  def ran_tests_result
-    '{"kata_ran_tests":{"index":7}}'
-  end
-
-  def ran_tests_body
-    {
-      id: 'AbCd3E',
-      files: { 'hiker.rb' => 'content' },
-      stdout: { 'content' => 'out', 'truncated' => false },
-      stderr: { 'content' => '',    'truncated' => false },
-      status: '0',
-      summary: 'red',
-      laptop_id: laptop_id
-    }.to_json
   end
 
 end

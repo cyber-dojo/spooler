@@ -32,9 +32,12 @@ class DbSchemaTest < TestBase
   | each kata isolated from the others
   ) do
     in_temp_db do |db|
-      db.append(kata_id: 'AbCd3E', path: 'kata_file_edit', body: '{"id":"AbCd3E"}')
-      db.append(kata_id: 'AbCd3E', path: 'kata_ran_tests', body: '{"id":"AbCd3E"}')
-      db.append(kata_id: 'Xy9k2P', path: 'kata_file_edit', body: '{"id":"Xy9k2P"}')
+      db.append(path: 'kata_file_edit', body: '{"id":"AbCd3E"}',
+                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1)
+      db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
+                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2)
+      db.append(path: 'kata_file_edit', body: '{"id":"Xy9k2P"}',
+                kata_id: 'Xy9k2P', laptop_id: laptop_id, tab_seq: 1)
       assert_equal 2, db.event_count(kata_id: 'AbCd3E')
       assert_equal 1, db.event_count(kata_id: 'Xy9k2P')
       rows = db.events_for(kata_id: 'AbCd3E')
@@ -47,10 +50,28 @@ class DbSchemaTest < TestBase
   | append returned (delete-on-ack: presence in the buffer means undrained)
   ) do
     in_temp_db do |db|
-      id = db.append(kata_id: 'AbCd3E', path: 'kata_ran_tests', body: '{"id":"AbCd3E"}')
+      id = db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
+                     kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1)
       assert_equal 1, db.buffered_events.size
       db.delete(id)
       assert_equal 0, db.buffered_events.size
+    end
+  end
+
+  test 'Db0006', %w(
+  | re-appending a write with the same (kata_id, laptop_id, tab_seq) is deduped
+  | to a single buffered row, and append returns that original row's id (not the
+  | most-recently-inserted row's) so the right row is drained
+  ) do
+    in_temp_db do |db|
+      first = db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
+                        kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 7)
+      db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
+                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 8)
+      redelivered = db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
+                              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 7)
+      assert_equal first, redelivered
+      assert_equal 2, db.buffered_events.size
     end
   end
 
