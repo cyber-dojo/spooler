@@ -170,4 +170,22 @@ class DrainerTest < TestBase
     assert_equal [poll, poll, poll], sleeps
   end
 
+  test 'Dn0011', %w(
+  | a sharded drainer drains only the katas in its shard; two shards of two
+  | together drain every kata (a disjoint partition by kata_id)
+  ) do
+    db = in_memory_db
+    saver_returns(200, '{}')
+    katas = %w(aB3dE7 Xy9k2P Qw4rT6 Zx8cV2 Mn5bH1 Kp7jL9)
+    katas.each_with_index do |kata, i|
+      db.append(path: 'kata_ran_tests', body: %({"id":"#{kata}"}),
+                kata_id: kata, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000 + i)
+    end
+    Drainer.new(externals, shard_index: 0, shard_count: 2).drain
+    remaining = db.buffered_events.map { |event| event['kata_id'] }.sort
+    assert_equal katas.reject { |kata| Drainer.shard_of(kata, 2).zero? }.sort, remaining
+    Drainer.new(externals, shard_index: 1, shard_count: 2).drain
+    assert_empty db.buffered_events
+  end
+
 end

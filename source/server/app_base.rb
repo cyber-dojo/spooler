@@ -50,17 +50,16 @@ class AppBase < Sinatra::Base
 
   # - - - - - - - - - - - - - - - - - - - - - -
 
-  def self.post_pass_through(path)
-    # Register a POST route that persists the write to the durable buffer, then
-    # forwards it to saver and returns saver's response verbatim: status
-    # (including a non-2xx such as 500), content-type, and body. The request
-    # body (including the tab_seq ordering field) is forwarded byte-for-byte;
-    # saver owns the write contract.
+  def self.post_write(path)
+    # Register a POST route for one write endpoint: durably append the write to
+    # the spool and ack 200. It does NOT forward to saver - the drainer does that
+    # asynchronously - so the client is never gated on saver's git commit. A
+    # malformed (non-JSON) body raises RequestError and maps to 400.
     post "/#{path}" do
-      relayed = @externals.spool.write(path.to_s, request_body)
-      status(relayed.code.to_i)
-      headers['Content-Type'] = relayed.content_type || 'application/json'
-      body(relayed.body)
+      @externals.spool.write(path.to_s, request_body)
+      status(200)
+      content_type(:json)
+      '{}'
     end
   end
 

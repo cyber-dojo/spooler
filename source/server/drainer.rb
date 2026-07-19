@@ -1,3 +1,4 @@
+require 'zlib'
 require_relative 'backoff'
 
 class Drainer
@@ -13,10 +14,20 @@ class Drainer
   POLL_INTERVAL_MS = 250
   BACKOFF_CAP_MS = 10_000
 
-  def initialize(externals)
-    # Hold the service locator so a drain can reach the buffer (db) and the
-    # saver forwarder. next_expected is the per-writer reorder pointer (see drain).
+  def self.shard_of(kata_id, shard_count)
+    # The drainer-worker index (0...shard_count) that owns this kata. A stable
+    # hash (not String#hash, which is per-process random) so a kata maps to the
+    # same shard across workers; a re-seed after a restart is safe regardless.
+    Zlib.crc32(kata_id) % shard_count
+  end
+
+  def initialize(externals, shard_index: 0, shard_count: 1)
+    # externals is the service locator (db, saver, time). This worker drains the
+    # katas whose shard_of is shard_index; the default single shard drains all.
+    # next_expected is the per-writer reorder pointer (see drain).
     @externals = externals
+    @shard_index = shard_index
+    @shard_count = shard_count
     @next_expected = {}
   end
 
@@ -29,9 +40,8 @@ class Drainer
     # every writer shares the one saver. Return true if the pass hit no failure
     # (healthy, held, or nothing to do), false if it stopped on one - the loop
     # uses this to choose the poll interval or the backoff.
-    by_writer = @externals.db.buffered_events.group_by do |event|
-      [event['kata_id'], event['laptop_id']]
-    end
+    mine = @externals.db.buffered_events.select { |event| mine?(event['kata_id']) }
+    by_writer = mine.group_by { |event| [event['kata_id'], event['laptop_id']] }
     by_writer.each do |writer, events|
       return false unless drain_writer(writer, events.sort_by { |event| event['tab_seq'] })
     end
@@ -54,6 +64,11 @@ class Drainer
   end
 
   private
+
+  def mine?(kata_id)
+    # Whether this worker's shard owns the kata.
+    self.class.shard_of(kata_id, @shard_count) == @shard_index
+  end
 
   def drain_writer(writer, events)
     # events are this writer's buffered rows, tab_seq ascending. Release them in

@@ -52,10 +52,21 @@ class TestBase < Id58TestBase
   end
 
   def time_is(now_ms)
-    # Inject a fixed clock so a test controls the t1 stamped on an append.
+    # Inject a fixed clock so a test controls the enqueued_at stamped on an append.
     stub = TimeStub.new(now_ms)
     externals.instance_exec { @time = stub }
     stub
+  end
+
+  def wait_until(timeout_s: 2)
+    # Poll the block until it is truthy, failing rather than hanging if it never
+    # becomes true within timeout_s. Used to wait for background drainer threads.
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_s
+    until yield
+      flunk("condition not met within #{timeout_s}s") if
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      sleep(0.005)
+    end
   end
 
   # - - - - - - - - - - - - - - - - - - - - - - - - - -

@@ -18,22 +18,26 @@ class SaverHttpStub
   end
 
   def forwarded
-    # The Net::HTTP request objects the pass-through sent, in order.
+    # The Net::HTTP request objects sent, in order (a snapshot).
     @connection.requests
   end
 
   class Connection
-    attr_reader :requests
-
     def initialize(response)
       @response = response
       @requests = []
+      @mutex = Mutex.new
     end
 
     def request(request)
       # Record the forwarded request and return the canned saver response.
-      @requests << request
+      # Synchronised because several drainer threads may forward at once.
+      @mutex.synchronize { @requests << request }
       @response
+    end
+
+    def requests
+      @mutex.synchronize { @requests.dup }
     end
   end
 

@@ -772,23 +772,52 @@ B3: durable async via the spooler.
        the failure backoff (250ms doubling to the 10s cap) chosen from the pass
        outcome. An injectable sleeper and a stop-after-N hook keep it testable;
        no threads yet.
-    5. Shard and run. `hash(kata_id) % N` assigns each kata to one worker; start N
-       Drainer workers as background threads at boot, each looping over its shard,
-       with graceful stop. Add a concurrency stress test (many katas x events x N
-       workers -> every event reaches saver and per-`(kata_id, laptop_id)` `tab_seq`
-       order holds). Still additive: intake forwards synchronously, so the drainer
-       only retries rows a synchronous forward left behind.
-    6. Intake append-only (contract). `Spool#write` appends (stamping `enqueued_at`) and
-       returns a bare 200 ack, dropping the synchronous forward+delete; the drainer
-       is the sole forwarder. saver's response no longer flows back through a write
-       (web already ignores it, A4/A5). The synchronous-forward tests move to the
-       drainer suite.
+    5. Shard the drainer. `Drainer.shard_of` (a stable CRC32, not String#hash)
+       assigns each kata to one of N worker Drainers; a DrainerPool runs each in a
+       background thread over its shard, with graceful stop. A concurrency stress
+       test drains many katas x events across N threads and asserts every event
+       reaches saver exactly once and per-`(kata_id, laptop_id)` `tab_seq` order
+       holds. The pool is built and stress-tested but NOT started at boot yet
+       (step 6): starting it now would drain the shared test buffer behind the
+       pass-through tests. Still additive regardless: intake forwards synchronously.
+    6. Intake append-only (contract), and start the pool at boot. `Spool#write`
+       appends (stamping `enqueued_at`) and returns a bare 200 ack, dropping the
+       synchronous forward+delete; the DrainerPool, started at boot, is the sole
+       forwarder. saver's response no longer flows back through a write (web
+       already ignores it, A4/A5). The synchronous-forward tests move to the
+       drainer suite, and the pass-through/intake tests move off the shared buffer
+       to isolated dbs so a boot-started pool cannot drain behind them.
     7. web (separate repo). Make test writes synchronous to the spooler's ack and
        retried until acked FIRST (or in the same deploy), THEN make ITE writes
        fire-and-forget; add the diff-view materialisation spinner/poll. Reordering
        becomes possible and test events become durable together here, so the
        skip-timeout invariant (a missing seq is only ever a superseded ITE) holds
        the moment skipping can occur.
+  DONE (spooler, steps 0-6): the durable async write path is complete on the
+  spooler side.
+  - Intake. `Spool#write` appends the write to the SQLite buffer (stamping
+    `enqueued_at` from the injectable clock) and the `post_write` route acks 200 -
+    no saver call. A non-JSON body is refused with 400 before anything is buffered.
+  - Drainer. A `DrainerPool` of N sharded worker threads (`Drainer.shard_of`,
+    CRC32), started at boot in `config.ru`, forwards buffered writes to saver: per
+    writer `(kata_id, laptop_id)` in `tab_seq` order via an in-memory next-expected
+    pointer (seeded at first sight), holding a gap and skipping it once it ages past
+    `SKIP_TIMEOUT_MS`, dropping a late below-expected seq, deleting each row on ack,
+    and retrying a failed forward with a `Backoff` (`POLL_INTERVAL_MS` base doubling
+    to `BACKOFF_CAP_MS`). Starting drains any rows a previous process left undrained
+    (crash recovery); it then runs continuously.
+  - One process (step 0). puma runs one threaded process, so the shared SQLite
+    connection is gem-serialised (THREADSAFE=1) and the drainer is a fixed set of
+    in-process threads.
+  - Tested. Db (open/WAL/busy_timeout, append/read/delete/dedup/enqueued_at); Sp
+    (append + ack + not-forwarded, non-JSON 400, dedup, all endpoints); Dn (ordered
+    drain, skip-timeout, drop-late, backoff loop, shard partition); Bk (backoff);
+    Dp (a concurrency stress test: many katas x events x N threads deliver every
+    write exactly once, each kata in tab_seq order).
+  NOT yet done: step 7 (web-side fire-and-forget ITEs + diff-view materialisation,
+  separate repo); the spooler's ECS service and EBS mount (deployment, see B1); and
+  a client-side integration test (write via the spooler -> drainer -> read back
+  from the compose saver).
 
 B4: simplify saver to an idempotent append (contract).
   The dedup guard already exists from A8; with the spooler now the single ordered
