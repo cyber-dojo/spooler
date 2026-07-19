@@ -258,24 +258,24 @@ Boot and container (`config/`):
 
 The app (three collaborating classes):
 
-- `App < AppBase` (`app.rb`) is a pure routing table. Its whole body is a list of
-  `get_json(:collaborator, :method)` / `post_json(:collaborator, :method)`
-  declarations, each mapping one HTTP path to one `(collaborator, method)` pair.
+- `App < AppBase` (`app.rb`) is a pure routing table: a list of
+  `get_json(:collaborator, :method)` declarations (the probes) and `post_write`
+  declarations (the nine write endpoints), each mapping one HTTP path to one action.
 - `AppBase < Sinatra::Base` (`app_base.rb`) is the reusable base: it defines the
-  `get_json`/`post_json` class macros that register the routes, parses the JSON
-  request body, dispatches through a single `json_result` method
+  `get_json` and `post_write` class macros that register the routes, parses the
+  JSON request body, dispatches a GET through a single `json_result` method
   (`externals.public_send(collaborator).public_send(method, **args)`), and maps
-  every exception to a uniform status (400 RequestError, 505 NoLongerImplemented,
-  500 otherwise) in one `error` block.
+  every exception to a status (400 RequestError, else 500) in one `error` block.
 - `Externals` (`externals.rb`) is a lazily-memoized service locator: the single
   object injected into `App`, exposing each collaborator (`model`, `disk`, and so
   on) as a memoized accessor.
 
-The spooler fills this skeleton with its own contents. Its `Externals` wires a
-SQLite-backed model (section 7) and a saver-forwarder in place of saver's
-git-on-disk collaborators, and its `App` exposes saver's write API paths
-(`kata_file_create` ... `kata_checked_out`), which is exactly what B1 stands up as
-a transparent pass-through before the durable buffer is added.
+The spooler fills this skeleton with its own contents. Its `Externals` wires the
+SQLite buffer (section 7), a sharded drainer, and a saver client in place of
+saver's git-on-disk collaborators, and its `App` exposes saver's write API paths
+(`kata_file_create` ... `kata_checked_out`) as durable-append endpoints: each
+appends the write to the buffer and acks 200, and the drainer forwards to saver
+asynchronously.
 
 ## Alternatives considered
 
@@ -777,16 +777,17 @@ B3: durable async via the spooler.
        background thread over its shard, with graceful stop. A concurrency stress
        test drains many katas x events across N threads and asserts every event
        reaches saver exactly once and per-`(kata_id, laptop_id)` `tab_seq` order
-       holds. The pool is built and stress-tested but NOT started at boot yet
-       (step 6): starting it now would drain the shared test buffer behind the
-       pass-through tests. Still additive regardless: intake forwards synchronously.
+       holds. The pool is built and stress-tested here; it is started at boot in
+       step 6, paired with the intake flip. Still additive: intake forwards
+       synchronously, so the pool only retries rows a synchronous forward stranded.
     6. Intake append-only (contract), and start the pool at boot. `Spool#write`
        appends (stamping `enqueued_at`) and returns a bare 200 ack, dropping the
        synchronous forward+delete; the DrainerPool, started at boot, is the sole
        forwarder. saver's response no longer flows back through a write (web
-       already ignores it, A4/A5). The synchronous-forward tests move to the
-       drainer suite, and the pass-through/intake tests move off the shared buffer
-       to isolated dbs so a boot-started pool cannot drain behind them.
+       already ignores it, A4/A5). The B1 relay tests are removed (the relay no
+       longer exists); every remaining test uses an isolated db (a spy, an
+       in-memory, or a temp file), so a boot-started pool has no shared test
+       buffer to drain behind.
     7. web (separate repo). Make test writes synchronous to the spooler's ack and
        retried until acked FIRST (or in the same deploy), THEN make ITE writes
        fire-and-forget; add the diff-view materialisation spinner/poll. Reordering
