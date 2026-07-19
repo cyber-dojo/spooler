@@ -34,8 +34,8 @@ class TestBase < Id58TestBase
   end
 
   def saver_returns(code, body)
-    # Inject a stub http transport so a write (or replay) reaches a canned saver
-    # response instead of a real saver.
+    # Inject a stub http transport so a write reaches a canned saver response
+    # instead of a real saver.
     stub = SaverHttpStub.new(SaverResponseStub.new(code: code, body: body))
     externals.instance_exec { @http = stub }
     stub

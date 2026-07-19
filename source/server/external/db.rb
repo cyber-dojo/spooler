@@ -54,8 +54,8 @@ module External
     end
 
     def buffered_events
-      # Every undrained row, oldest first, as string-keyed hashes. Boot replay
-      # re-forwards these; each is deleted once saver acks it.
+      # Every undrained row, oldest first, as string-keyed hashes: the rows a
+      # drainer would forward to saver, each deleted once saver acks it.
       rows = @db.execute('SELECT id, kata_id, path, body FROM events ORDER BY id;')
       rows.map do |id, kata_id, path, body|
         { 'id' => id, 'kata_id' => kata_id, 'path' => path, 'body' => body }

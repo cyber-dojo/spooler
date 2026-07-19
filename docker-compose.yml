@@ -21,6 +21,7 @@ services:
 
   server:
     platform: linux/amd64
+    depends_on: [ saver ]
     build:
       context: .
       args:
@@ -36,3 +37,20 @@ services:
     volumes:
       - ./source/server:/spooler/source:ro
       - ./test/server:/spooler/test:ro
+
+  # The spooler's downstream: a real saver the spooler forwards writes to,
+  # reached at hostname 'saver' (External::Saver default) on CYBER_DOJO_SAVER_PORT.
+  # Its image and tag are pinned by versioner (see bin/echo_env_vars.sh). Its
+  # ready? is unconditional and its write path diffs in-process, so it needs no
+  # differ. Integration tests write through the spooler and read back from this
+  # saver to confirm the writes landed.
+  saver:
+    platform: linux/amd64
+    image: ${CYBER_DOJO_SAVER_IMAGE}:${CYBER_DOJO_SAVER_TAG}
+    user: ${CYBER_DOJO_SAVER_SERVER_USER}
+    env_file: [ .env ]
+    read_only: true
+    restart: no
+    tmpfs:
+      - /cyber-dojo:uid=19663,gid=65533
+      - /tmp

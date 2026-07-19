@@ -27,17 +27,6 @@ class Spool
     response
   end
 
-  def replay
-    # Re-forward every buffered (undrained) write to saver, oldest first, and
-    # delete each one saver acks. Run once at startup so writes persisted but not
-    # yet drained before a crash or restart are recovered rather than lost; a
-    # redelivery is a no-op at saver via its idempotency key.
-    @externals.db.buffered_events.each do |event|
-      response = @externals.saver.forward(event['path'], event['body'])
-      @externals.db.delete(event['id']) if drained?(response)
-    end
-  end
-
   private
 
   def drained?(response)

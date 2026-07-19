@@ -21,6 +21,12 @@ echo_env_vars()
     docker run --rm cyberdojo/versioner 2> /dev/null | grep PORT
   } > "${ROOT_DIR}/.env"
 
+  # Identities (image, tag, ...) of docker-compose.yml dependent services, i.e.
+  # the saver the spooler forwards to, from versioner. versioner has no USER, so
+  # saver's runtime user is set here.
+  docker run --rm cyberdojo/versioner 2> /dev/null
+  echo CYBER_DOJO_SAVER_SERVER_USER=saver
+
   echo CYBER_DOJO_SPOOLER_SERVER_USER=spooler
   echo CYBER_DOJO_SPOOLER_CLIENT_USER=nobody
   echo CYBER_DOJO_SPOOLER_CLIENT_IMAGE=cyberdojo/spooler-client

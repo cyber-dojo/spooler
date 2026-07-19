@@ -37,8 +37,8 @@ class SpoolPersistTest < TestBase
   end
 
   test 'Sp0003', %w(
-  | saver acking a write (2xx) drains it from the buffer (delete-on-ack), so a
-  | later boot replay will not re-forward it
+  | saver acking a write (2xx) drains it from the buffer (delete-on-ack), so it
+  | is not left behind to be re-forwarded
   ) do
     db = in_memory_db
     saver_returns(200, ran_tests_result)

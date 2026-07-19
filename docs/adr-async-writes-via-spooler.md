@@ -608,14 +608,15 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   PLAN (B2): removal is delete-on-ack. A buffered row is DELETED the moment saver
   acks it (2xx), so presence in the buffer means "undrained" and there is no
   `acked` column. This bounds the buffer to the live edge (matching the freshness
-  note's "deleted after ack") and makes boot replay simply "re-forward every
-  remaining row". A write saver rejects with 500 stays in the buffer (undrained);
-  under B2 it is re-forwarded only on boot replay, while continuous
-  retry-with-backoff of a stuck row is the B3 drainer, not B2.
+  note's "deleted after ack"). A write saver rejects with 500 stays in the buffer
+  (undrained); in B2 (synchronous forward, no drainer) it is re-forwarded only
+  when its writer retries the write (deduped to the same buffered row by its key).
+  Draining a stuck backlog - on boot and continuously, retrying with backoff - is
+  the B3 drainer, not B2.
   PLAN (B2): steps, each red-test first, behaviour staying synchronous throughout
   (no reorder buffer, skip-timeout, fire-and-forget, or background drainer - those
-  are B3). B2 only inserts a durable buffer plus crash replay beneath the existing
-  verbatim relay.
+  are B3). B2 only inserts a durable buffer beneath the existing verbatim relay;
+  draining that buffer (on boot and continuously) is B3.
     1. DB seam. Add an `External::Db` that opens the SQLite database on the
        `/sqlite` volume, sets WAL mode, and creates the `events` table if absent.
        Wire it into `Externals` behind an injectable path (mirroring the `http`
@@ -630,9 +631,8 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
        under `UNIQUE(kata_id, laptop_id, tab_seq)`, inserting with `INSERT OR
        IGNORE`, so a redelivered write still in the buffer is a single row (a write
        already drained-and-deleted is instead deduped at saver by its A8 key).
-    5. Boot replay. On startup the spooler re-forwards every row still in the
-       buffer to saver (idempotent via saver's A8 dedup) and deletes each on a 2xx -
-       this is the "a crash replays un-drained forwards" guarantee.
+    B2's scope is steps 1-4. Draining the buffer - on boot and continuously - is
+    B3's drainer, so B2 has no boot-replay step of its own.
   DONE (spooler, steps 1-4 plus refinements): the durable buffer exists, every
   write is persisted before being forwarded, a row is drained on ack, and a
   redelivery still in the buffer is deduped.
@@ -645,10 +645,9 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
     persists the write (`Db#append` returns the row id), forwards it to saver, and
     on a 2xx deletes the row (`Db#delete`) so only undrained writes remain; a
     non-2xx (e.g. 500) leaves the row buffered for a later re-forward. saver's
-    response is relayed verbatim, and the `post_pass_through` macro now routes
-    through `spool`, not `saver` directly. There is no `acked` column: presence in
-    the buffer is what "undrained" means. The existing pass-through relay tests
-    stay green.
+    response is relayed verbatim, and the `post_pass_through` macro routes through
+    `spool` (the model), which owns the forward to saver. There is no `acked`
+    column: presence in the buffer is what "undrained" means.
   - busy_timeout. `External::Db` sets `PRAGMA busy_timeout=5000`. This is a genuine
     production setting, not a test scaffold: puma runs `workers Etc.nprocessors`, so
     one task has several worker PROCESSES each holding its own connection to the one
@@ -685,7 +684,12 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
     row, a 500 leaves it buffered, a redelivery is deduped to one row). So the
     append/non-buffer assertions touch no real SQLite, while the drain/dedup
     assertions observe real buffer state; the shared file stays out of the test path.
-  NOT yet done (rest of B2): boot replay of the buffered rows on startup (step 5).
+  B2 is complete at steps 1-4; it has no remaining work. Draining the buffer (on
+  boot and continuously) belongs to B3's drainer, so B2 has no boot-replay.
+  Staged ahead for B3: the test compose runs a real
+  `saver` (its `docker-compose` service, image pinned by versioner) that the
+  spooler forwards to, ready for B3's drainer to be integration-tested end-to-end
+  (write via the spooler, read the events back from saver).
 
 B3: durable async via the spooler.
   ITE writes become fire-and-forget to the spooler's durable append; the spooler
@@ -697,6 +701,35 @@ B3: durable async via the spooler.
   a no-op. The diff-view read may briefly precede saver materialisation (spinner or
   poll, see Consequences). Gated on A1 (detection already read-side) and B2 (buffer
   proven).
+  The drainer drains the buffer both at startup (rows a previous process left
+  undrained) and continuously as writes arrive, retrying a failed forward with
+  backoff (see Drainer parameter values); draining on boot is the drainer's job,
+  not a step of its own. A real `saver` is already wired into the test compose
+  (see B2 DONE) so the drainer can be integration-tested end-to-end.
+  DESIGN (B3): intake and forwarding are separate concerns.
+  - Intake. `Spool#write` appends the write to the buffer and returns an ack (a
+    fast on-disk append), for both ITEs (fire-and-forget) and test events
+    (sync-to-durable-ack). It does not forward to saver; the response the client
+    sees is the spooler's ack, not saver's. Append, dedup and the JSON/400 reject
+    stay here.
+  - Forwarding. The drainer reads the buffer, forwards in `tab_seq` order, deletes
+    each row saver acks (delete-on-ack), and retries a failed forward with backoff.
+    The `Db` buffer is the only seam between intake and the drainer.
+  - Determinism, without a do-nothing stub. The drainer is a standalone unit with
+    an explicit `run`/`tick` entry point that `App`/`Externals` construction does
+    NOT auto-start. Intake tests build the app with no drainer running, so buffer
+    state is deterministic (nothing drains behind the test); drainer tests seed the
+    buffer and drive `tick` directly. Auto-starting the drainer on construction, or
+    putting it in the request path, is what would force a stub, so neither is done.
+  - One process, one drainer thread. The spooler runs as a single threaded process
+    (not puma cluster mode) and the drainer is one background thread in that
+    process, started at boot. A single process makes the drainer trivially single;
+    N worker processes would instead give one drainer per worker, all competing on
+    the one buffer. Threaded intake suffices because a write is an I/O-bound SQLite
+    append (the GVL is released during SQLite and the saver socket), so B3 changes
+    `workers Etc.nprocessors` to threaded single mode. Each thread - the intake
+    threads and the drainer - holds its own SQLite connection; WAL allows
+    concurrent readers plus one writer and busy_timeout serialises the writers.
 
 B4: simplify saver to an idempotent append (contract).
   The dedup guard already exists from A8; with the spooler now the single ordered
