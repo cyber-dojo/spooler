@@ -712,24 +712,83 @@ B3: durable async via the spooler.
     (sync-to-durable-ack). It does not forward to saver; the response the client
     sees is the spooler's ack, not saver's. Append, dedup and the JSON/400 reject
     stay here.
-  - Forwarding. The drainer reads the buffer, forwards in `tab_seq` order, deletes
-    each row saver acks (delete-on-ack), and retries a failed forward with backoff.
-    The `Db` buffer is the only seam between intake and the drainer.
+  - Forwarding. The drainer reads the buffer and forwards per `(kata_id, laptop_id)`
+    in `tab_seq` order (laptop_id already encodes tab_id - there is no separate
+    tab_id column), deletes each row saver acks (delete-on-ack), and retries a
+    failed forward with backoff. Ordering uses an in-memory next-expected `tab_seq`
+    per `(kata_id, laptop_id)`, held by the owning shard thread and seeded at first
+    sight from the lowest buffered seq (delete-on-ack removes forwarded rows, so the
+    buffer alone cannot tell a bottom gap from an already-forwarded prefix). The
+    SQLite buffer plus that pointer IS the reorder buffer - there is no separate
+    in-memory queue of rows; a gap is held until it fills or its held row's `enqueued_at`
+    enqueue timestamp is older than the skip-timeout. The `Db` buffer is the only
+    seam between intake and the drainer threads.
   - Determinism, without a do-nothing stub. The drainer is a standalone unit with
     an explicit `run`/`tick` entry point that `App`/`Externals` construction does
     NOT auto-start. Intake tests build the app with no drainer running, so buffer
     state is deterministic (nothing drains behind the test); drainer tests seed the
     buffer and drive `tick` directly. Auto-starting the drainer on construction, or
     putting it in the request path, is what would force a stub, so neither is done.
-  - One process, one drainer thread. The spooler runs as a single threaded process
-    (not puma cluster mode) and the drainer is one background thread in that
-    process, started at boot. A single process makes the drainer trivially single;
-    N worker processes would instead give one drainer per worker, all competing on
-    the one buffer. Threaded intake suffices because a write is an I/O-bound SQLite
-    append (the GVL is released during SQLite and the saver socket), so B3 changes
-    `workers Etc.nprocessors` to threaded single mode. Each thread - the intake
-    threads and the drainer - holds its own SQLite connection; WAL allows
-    concurrent readers plus one writer and busy_timeout serialises the writers.
+  - Sharded drainer threads in one process. The spooler runs as a single threaded
+    process (not puma cluster mode). Draining is done by N drainer threads, each
+    owning a shard of katas by `hash(kata_id) % N`; a kata is handled by exactly
+    one thread, so within-kata `tab_seq` order holds by construction and no two
+    threads ever forward the same kata - no lock, no shared drain state. Running in
+    one process is what makes that partition well-defined; N worker PROCESSES would
+    instead give one drainer per worker, all competing on the one buffer. Threaded
+    intake suffices because a write is an I/O-bound SQLite append (the GVL is
+    released during SQLite and the saver socket), so B3 changes
+    `workers Etc.nprocessors` to threaded single mode. All threads - the intake
+    threads and the drainer threads - share one SQLite connection. That is safe by
+    documented guarantee (not just observation): libsqlite is built THREADSAFE=1
+    (serialized) and the sqlite3 gem documents a `SQLite3::Database` as shareable
+    across threads when `SQLite3.threadsafe?` is true. A prepared
+    `SQLite3::Statement` is NOT shareable, so `External::Db` uses only the per-call
+    `execute`/`get_first_value` (a transient statement per call), never a cached or
+    shared prepared statement. The gem lock is held only for the fast
+    SELECT/INSERT/DELETE, not the network forward, so different katas' forwards on
+    different threads run in parallel and a forward never stalls another thread.
+    busy_timeout covers the cross-process blue-green overlap. Per-thread
+    connections are a deferred optimisation, not needed unless a bottleneck appears.
+  PLAN (B3): steps, expand/contract so the drainer exists and is proven before
+  intake stops forwarding (no window where nothing reaches saver). Each step is
+  independently deployable, and every prerequisite is built before the step that
+  needs it.
+    0. Single-threaded spooler. `workers Etc.nprocessors` -> threaded single mode,
+       keeping the one shared SQLite connection. Behaviour-neutral, reversible.
+       DONE.
+    1. Robust drain pass. `Drainer#drain` forwards buffered rows in order, deletes
+       each on ack, rescues a failed forward, STOPS the pass on the first failure,
+       and returns an ok/failing outcome for the loop to act on.
+    2. Enqueue timestamp + clock. Add a `enqueued_at` column and an injectable time seam;
+       intake stamps `enqueued_at` on append. Behaviour-neutral (unused until step 3), but a
+       prerequisite: skip-timeout has nothing to measure against without `enqueued_at`.
+    3. Ordered drain pass. Forward per `(kata_id, laptop_id)` in `tab_seq` order
+       using an in-memory next-expected pointer (seeded at first sight from the
+       lowest buffered seq); hold a gap and skip it once the held row's `enqueued_at` is
+       older than the skip-timeout (5s). Single Drainer; inert in production until
+       arrivals can be out of order (step 7).
+    4. Drain loop. Repeat drain, sleeping the poll-interval (250ms) when healthy or
+       the failure backoff (250ms doubling to the 10s cap) chosen from the pass
+       outcome. An injectable sleeper and a stop-after-N hook keep it testable;
+       no threads yet.
+    5. Shard and run. `hash(kata_id) % N` assigns each kata to one worker; start N
+       Drainer workers as background threads at boot, each looping over its shard,
+       with graceful stop. Add a concurrency stress test (many katas x events x N
+       workers -> every event reaches saver and per-`(kata_id, laptop_id)` `tab_seq`
+       order holds). Still additive: intake forwards synchronously, so the drainer
+       only retries rows a synchronous forward left behind.
+    6. Intake append-only (contract). `Spool#write` appends (stamping `enqueued_at`) and
+       returns a bare 200 ack, dropping the synchronous forward+delete; the drainer
+       is the sole forwarder. saver's response no longer flows back through a write
+       (web already ignores it, A4/A5). The synchronous-forward tests move to the
+       drainer suite.
+    7. web (separate repo). Make test writes synchronous to the spooler's ack and
+       retried until acked FIRST (or in the same deploy), THEN make ITE writes
+       fire-and-forget; add the diff-view materialisation spinner/poll. Reordering
+       becomes possible and test events become durable together here, so the
+       skip-timeout invariant (a missing seq is only ever a superseded ITE) holds
+       the moment skipping can occur.
 
 B4: simplify saver to an idempotent append (contract).
   The dedup guard already exists from A8; with the spooler now the single ordered
@@ -743,7 +802,7 @@ B4: simplify saver to an idempotent append (contract).
 
 ## Drainer parameter values
 
-Both knobs below bound the queue dwell (t1 enqueue to t2 forward) and are sized
+Both knobs below bound the queue dwell (enqueue to forward) and are sized
 against the ~5s read eventual-consistency budget. They are injected config; the
 values here are the defaults. The dominant scenario that sets the budget is a
 group kata: many participants write events for ~30 min then stop, after which a
@@ -766,11 +825,17 @@ Decided:
   rare case is acceptable. The skip only ever discards an ITE (a test event is
   sync-acked, so it can never be the missing seq) and a dropped ITE is harmless
   because the next event's cumulative file set supersedes it.
+- poll-interval = 250ms. After the drainer drains the buffer (or finds it empty)
+  with saver healthy, it sleeps this long before the next pass, and it is the base
+  the failure backoff doubles from up to backoff-cap. It bounds drainer-primary
+  delivery latency (a write reaches saver within ~250ms plus the forward), well
+  inside the 5s freshness budget, and costs ~4 empty reads/sec when idle. A signal
+  from intake could replace the poll later (both share one process), but the poll
+  meets the budget without the coordination.
 
-Recommended but not yet pinned (finer mechanics of the same two knobs): the
-backoff base and growth (e.g. ~200ms doubling) and jitter; and treating a
-genuine 4xx contract error as park/dead-letter rather than retry-forever, so one
-poison row cannot wedge the ordered channel while transient 5xx/timeout/
+Recommended but not yet pinned: backoff jitter; and treating a genuine 4xx
+contract error as park/dead-letter rather than retry-forever, so one poison row
+cannot wedge the ordered channel while transient 5xx/timeout/
 connection-refused failures still retry.
 
 ## Open questions
@@ -783,6 +848,16 @@ connection-refused failures still retry.
 - Whether the spooler should return a synchronous staleness verdict for test
   events (a cheap head check on the sync-acked path), restoring instant
   test-time detection while ITEs stay read-side.
+- Drainer shard count N vs peak write rate. Draining is sharded across N threads
+  (`hash(kata_id) % N`), so different katas forward in parallel (up to N at once)
+  while each kata stays ordered - matching, not serialising below, today's direct
+  web->saver cross-kata parallelism. The open question is sizing N against saver's
+  forward latency (a localhost round-trip plus saver's in-process git commit) and
+  peak aggregate write rate, and whether N-way is enough under a large group-kata
+  burst. A shortfall degrades freshness (a backlog forms, writes land late) but
+  never durability (they still land). If N threads on one host are not enough, the
+  next step is multiple hosts - the NATS/Valkey fallback in Alternatives
+  considered. Measure saver forward latency against realistic peak load to pick N.
 
 ## Future work: a freshness and anomaly API
 
@@ -802,7 +877,7 @@ is what I am seeing, and is anything stuck".
 Freshness (per kata-id):
 
 - backlog depth: rows queued but not yet acked by saver.
-- drain lag: age of the oldest undrained row (t1 to now).
+- drain lag: age of the oldest undrained row (enqueued_at to now).
 - drainer-in-backoff: whether saver is currently unreachable (the drainer is
   retrying under the backoff-cap).
 

@@ -16,11 +16,12 @@ class Spool
     # relay; a non-2xx leaves the row buffered for a later re-forward.
     fields = json_body(body)
     id = @externals.db.append(
-      path:      path,
-      body:      body,
-      kata_id:   fields['id'],
-      laptop_id: fields['laptop_id'],
-      tab_seq:   fields['tab_seq']
+      path:        path,
+      body:        body,
+      kata_id:     fields['id'],
+      laptop_id:   fields['laptop_id'],
+      tab_seq:     fields['tab_seq'],
+      enqueued_at: @externals.time.now
     )
     response = @externals.saver.forward(path, body)
     @externals.db.delete(id) if drained?(response)

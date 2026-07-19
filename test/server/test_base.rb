@@ -1,6 +1,8 @@
 require_relative 'id58_test_base'
 require_relative 'capture_stdout_stderr'
 require_relative 'doubles/saver_http_stub'
+require_relative 'doubles/saver_http_raises'
+require_relative 'doubles/time_stub'
 require_relative 'helpers/externals'
 require_relative 'helpers/rack'
 require_relative 'require_source'
@@ -38,6 +40,21 @@ class TestBase < Id58TestBase
     # instead of a real saver.
     stub = SaverHttpStub.new(SaverResponseStub.new(code: code, body: body))
     externals.instance_exec { @http = stub }
+    stub
+  end
+
+  def saver_raises(error)
+    # Inject an http transport that raises on every request, simulating saver
+    # being unreachable (the forward raises rather than returning a response).
+    stub = SaverHttpRaises.new(error)
+    externals.instance_exec { @http = stub }
+    stub
+  end
+
+  def time_is(now_ms)
+    # Inject a fixed clock so a test controls the t1 stamped on an append.
+    stub = TimeStub.new(now_ms)
+    externals.instance_exec { @time = stub }
     stub
   end
 

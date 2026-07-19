@@ -2,6 +2,13 @@ require 'sqlite3'
 
 module External
 
+  # One Db wraps one SQLite connection, shared across all threads (the intake
+  # threads and the drainer). That sharing is safe because libsqlite is built
+  # THREADSAFE=1 (serialized) and the sqlite3 gem documents a SQLite3::Database
+  # as safe to share between threads when SQLite3.threadsafe? is true. A prepared
+  # SQLite3::Statement is NOT safe to share, so every method here uses the
+  # per-call execute/get_first_value (a transient statement per call) and never
+  # caches or shares a prepared statement across threads. Keep it that way.
   class Db
 
     def initialize(path)
@@ -10,37 +17,41 @@ module External
       # the events buffer table exists.
       @db = SQLite3::Database.new(path)
       @db.execute('PRAGMA journal_mode=WAL;')
-      # Multiple puma workers (and, briefly, a blue/green pair) each hold their
-      # own connection to this one file. WAL serialises writers; busy_timeout
-      # makes a writer that collides wait rather than erroring SQLITE_BUSY.
+      # Within the one process the gem serialises this shared connection, so no
+      # writer collides. busy_timeout covers the only cross-process case: the
+      # brief blue/green deploy overlap where the old and new tasks both hold the
+      # volume; the second writer then waits rather than erroring SQLITE_BUSY.
       @db.execute('PRAGMA busy_timeout=5000;')
       @db.execute(<<~SQL)
         CREATE TABLE IF NOT EXISTS events (
-          id        INTEGER PRIMARY KEY,
-          kata_id   TEXT,
-          laptop_id TEXT,
-          tab_seq   INTEGER,
-          path      TEXT NOT NULL,
-          body      TEXT NOT NULL,
+          id          INTEGER PRIMARY KEY,
+          kata_id     TEXT,
+          laptop_id   TEXT,
+          tab_seq     INTEGER,
+          path        TEXT NOT NULL,
+          body        TEXT NOT NULL,
+          enqueued_at INTEGER NOT NULL,
           UNIQUE(kata_id, laptop_id, tab_seq)
         );
       SQL
     end
 
-    def append(path:, body:, kata_id:, laptop_id:, tab_seq:)
+    def append(path:, body:, kata_id:, laptop_id:, tab_seq:, enqueued_at:)
       # Persist one write as a buffered event row and return its row id. kata_id
       # is the kata the write belongs to (each kata is its own ordered log); path
-      # is the write method name; body its verbatim request body. A row stays
-      # buffered (undrained) until delete drains it.
+      # is the write method name; body its verbatim request body; enqueued_at is
+      # the epoch-ms time it entered the buffer (used to age reorder-buffer gaps).
+      # A row stays buffered (undrained) until delete drains it.
       #
       # (kata_id, laptop_id, tab_seq) is the idempotency key: a redelivered write
-      # still in the buffer is deduped to one row (a no-op UPSERT), and its
-      # original id is returned so the caller drains the right row. A write whose
-      # key has a nil part (no tab_seq) is not deduped - SQLite treats NULLs as
-      # distinct in the UNIQUE constraint - which is correct: it has no key.
-      rows = @db.execute(<<~SQL, [path, body, kata_id, laptop_id, tab_seq])
-        INSERT INTO events (path, body, kata_id, laptop_id, tab_seq)
-        VALUES (?, ?, ?, ?, ?)
+      # still in the buffer is deduped to one row (a no-op UPSERT that keeps the
+      # original enqueued_at), and its original id is returned so the caller
+      # drains the right row. A write whose key has a nil part (no tab_seq) is not
+      # deduped - SQLite treats NULLs as distinct in the UNIQUE constraint - which
+      # is correct: it has no key.
+      rows = @db.execute(<<~SQL, [path, body, kata_id, laptop_id, tab_seq, enqueued_at])
+        INSERT INTO events (path, body, kata_id, laptop_id, tab_seq, enqueued_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(kata_id, laptop_id, tab_seq) DO UPDATE SET path = path
         RETURNING id;
       SQL
@@ -56,9 +67,14 @@ module External
     def buffered_events
       # Every undrained row, oldest first, as string-keyed hashes: the rows a
       # drainer would forward to saver, each deleted once saver acks it.
-      rows = @db.execute('SELECT id, kata_id, path, body FROM events ORDER BY id;')
-      rows.map do |id, kata_id, path, body|
-        { 'id' => id, 'kata_id' => kata_id, 'path' => path, 'body' => body }
+      rows = @db.execute(<<~SQL)
+        SELECT id, kata_id, laptop_id, tab_seq, path, body, enqueued_at
+        FROM events ORDER BY id;
+      SQL
+      rows.map do |id, kata_id, laptop_id, tab_seq, path, body, enqueued_at|
+        { 'id' => id, 'kata_id' => kata_id, 'laptop_id' => laptop_id,
+          'tab_seq' => tab_seq, 'path' => path, 'body' => body,
+          'enqueued_at' => enqueued_at }
       end
     end
 

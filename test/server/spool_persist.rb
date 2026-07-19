@@ -8,13 +8,16 @@ class SpoolPersistTest < TestBase
   | body, and saver's response is still relayed verbatim
   ) do
     spy = db_append_spy
+    time_is(1_700_000_000_000)
     saver_returns(200, ran_tests_result)
     response = post_json('/kata_ran_tests', ran_tests_body)
     assert_equal 200, response.status
     assert_equal ran_tests_result, response.body
     assert_equal(
       [{ path: 'kata_ran_tests', body: ran_tests_body,
-         kata_id: id58, laptop_id: laptop_id, tab_seq: 4 }],
+         kata_id: id58, laptop_id: laptop_id, tab_seq: 4,
+         enqueued_at: 1_700_000_000_000
+      }],
       spy.appends
     )
   end

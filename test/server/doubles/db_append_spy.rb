@@ -12,11 +12,13 @@ class DbAppendSpy
     @appends = []
   end
 
-  def append(path:, body:, kata_id:, laptop_id:, tab_seq:)
+  def append(path:, body:, kata_id:, laptop_id:, tab_seq:, enqueued_at:)
     # Record one persisted write instead of storing it; return a stand-in row
     # id (the caller may pass it back to delete).
     @appends << {
-      path: path, body: body, kata_id: kata_id, laptop_id: laptop_id, tab_seq: tab_seq
+      path: path, body: body,
+      kata_id: kata_id, laptop_id: laptop_id, tab_seq: tab_seq,
+      enqueued_at: enqueued_at
     }
     @appends.size
   end

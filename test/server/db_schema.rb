@@ -33,11 +33,11 @@ class DbSchemaTest < TestBase
   ) do
     in_temp_db do |db|
       db.append(path: 'kata_file_edit', body: '{"id":"AbCd3E"}',
-                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1)
+                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
       db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
-                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2)
+                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2, enqueued_at: 2000)
       db.append(path: 'kata_file_edit', body: '{"id":"Xy9k2P"}',
-                kata_id: 'Xy9k2P', laptop_id: laptop_id, tab_seq: 1)
+                kata_id: 'Xy9k2P', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 3000)
       assert_equal 2, db.event_count(kata_id: 'AbCd3E')
       assert_equal 1, db.event_count(kata_id: 'Xy9k2P')
       rows = db.events_for(kata_id: 'AbCd3E')
@@ -51,7 +51,7 @@ class DbSchemaTest < TestBase
   ) do
     in_temp_db do |db|
       id = db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
-                     kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1)
+                     kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
       assert_equal 1, db.buffered_events.size
       db.delete(id)
       assert_equal 0, db.buffered_events.size
@@ -65,13 +65,24 @@ class DbSchemaTest < TestBase
   ) do
     in_temp_db do |db|
       first = db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
-                        kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 7)
+                        kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 7, enqueued_at: 7000)
       db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
-                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 8)
+                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 8, enqueued_at: 8000)
       redelivered = db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
-                              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 7)
+                              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 7, enqueued_at: 9000)
       assert_equal first, redelivered
       assert_equal 2, db.buffered_events.size
+    end
+  end
+
+  test 'Db0007', %w(
+  | an appended row stores the enqueued_at timestamp it was given, readable back
+  ) do
+    in_temp_db do |db|
+      db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
+                kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1,
+                enqueued_at: 1_700_000_000_000)
+      assert_equal 1_700_000_000_000, db.buffered_events.first['enqueued_at']
     end
   end
 
