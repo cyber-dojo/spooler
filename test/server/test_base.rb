@@ -1,5 +1,4 @@
 require_relative 'id58_test_base'
-require_relative 'capture_stdout_stderr'
 require_relative 'doubles/saver_http_stub'
 require_relative 'doubles/saver_http_raises'
 require_relative 'doubles/time_stub'
@@ -12,7 +11,6 @@ require_source 'external/db'
 
 class TestBase < Id58TestBase
 
-  include CaptureStdoutStderr
   include TestHelpersExternals
   include TestHelpersRack
 
@@ -63,8 +61,12 @@ class TestBase < Id58TestBase
     # becomes true within timeout_s. Used to wait for background drainer threads.
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_s
     until yield
-      flunk("condition not met within #{timeout_s}s") if
-        Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      # :nocov: - the timeout only fires if the awaited condition never holds,
+      # i.e. a genuine failure, so it never runs in a green test.
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        flunk("condition not met within #{timeout_s}s")
+      end
+      # :nocov:
       sleep(0.005)
     end
   end

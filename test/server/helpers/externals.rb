@@ -7,16 +7,8 @@ module TestHelpersExternals
     @externals ||= Externals.new
   end
 
-  def http
-    externals.http
-  end
-
   def prober
     externals.prober
-  end
-
-  def saver
-    externals.saver
   end
 
 end

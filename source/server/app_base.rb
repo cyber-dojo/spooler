@@ -3,7 +3,6 @@ require 'sinatra/base'
 silently { require 'sinatra/contrib' } # N x "warning: method redefined"
 require_relative 'lib/json_adapter'
 require_relative 'lib/utf8_clean'
-require_relative 'no_longer_implemented_error'
 require_relative 'request_error'
 require 'json'
 
@@ -25,20 +24,6 @@ class AppBase < Sinatra::Base
   def self.get_json(klass_name, method_name)
     # Register a GET route that dispatches to externals.klass_name.method_name.
     get "/#{method_name}", provides:[:json] do
-      respond_to do |format|
-        format.json do
-          args = to_json_object(request_body)
-          json_result(klass_name, method_name, args)
-        end
-      end
-    end
-  end
-
-  # - - - - - - - - - - - - - - - - - - - - - -
-
-  def self.post_json(klass_name, method_name)
-    # Register a POST route that dispatches to externals.klass_name.method_name.
-    post "/#{method_name}", provides:[:json] do
       respond_to do |format|
         format.json do
           args = to_json_object(request_body)
@@ -79,14 +64,8 @@ class AppBase < Sinatra::Base
   end
 
   def to_json_object(body)
-    # Parse the request body (or query params) into a Hash of args.
-    if body != ''
-      json = json_parse(body)
-    elsif params.empty?
-      json = {}
-    else
-      json = params.map{ |key,value| [key,value] }.to_h
-    end
+    # Parse the request body into a Hash of args (an empty body is no args).
+    json = body == '' ? {} : json_parse(body)
     unless json.instance_of?(Hash)
       fail RequestError, 'body is not JSON Hash'
     end
@@ -102,9 +81,7 @@ class AppBase < Sinatra::Base
   error do
     # Map any uncaught error to a status code, log it, and return the message.
     error = $!
-    if error.is_a?(NoLongerImplementedError)
-      status(505)
-    elsif error.is_a?(RequestError)
+    if error.is_a?(RequestError)
       status(400)
     else
       status(500)
