@@ -170,6 +170,27 @@ class DrainerTest < TestBase
     assert_equal [poll, poll, poll], sleeps
   end
 
+  test 'Dn00P1', %w(
+  | a write saver rejects (a reachable saver returning a non-2xx - eg a poison
+  | write for a kata that does not exist) stalls only its own writer: the other
+  | writers in the shard still drain, so one poison write cannot wedge the channel.
+  | The poison write stays buffered (retried on a later pass), it is not lost.
+  ) do
+    db = in_memory_db
+    poison  = 'PoIsN1'
+    healthy = 'HeaLtH'
+    # poison enqueued first, so a stop-on-first-failure pass would give up before
+    # ever reaching the healthy writer.
+    db.append(path: 'kata_ran_tests', body: %({"id":"#{poison}"}),
+              kata_id: poison, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
+    db.append(path: 'kata_ran_tests', body: %({"id":"#{healthy}"}),
+              kata_id: healthy, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1001)
+    saver_rejects_kata(poison)
+    externals.drainer.drain
+    assert_equal [poison], db.buffered_events.map { |event| event['kata_id'] },
+      'the healthy write must drain even though the poison write is rejected'
+  end
+
   test 'Dn0011', %w(
   | a sharded drainer drains only the katas in its shard; two shards of two
   | together drain every kata (a disjoint partition by kata_id)
@@ -186,6 +207,35 @@ class DrainerTest < TestBase
     assert_equal katas.reject { |kata| Drainer.shard_of(kata, 2).zero? }.sort, remaining
     Drainer.new(externals, shard_index: 1, shard_count: 2).drain
     assert_empty db.buffered_events
+  end
+
+  private
+
+  # An http transport (the Externals#http seam) that answers a forwarded write
+  # with 500 when its body is for poison_kata_id (a reachable saver refusing a
+  # write that will never succeed) and 200 for every other kata. Lets a test
+  # prove a poison writer does not block the healthy writers draining.
+  def saver_rejects_kata(poison_kata_id)
+    stub = Class.new do
+      def initialize(poison)
+        @poison = poison
+        @requests = []
+        @mutex = Mutex.new
+      end
+      def new(_hostname, _port)
+        self
+      end
+      def request(request)
+        @mutex.synchronize { @requests << request }
+        code = request.body.include?(@poison) ? 500 : 200
+        SaverResponseStub.new(code: code, body: '{}')
+      end
+      def requests
+        @mutex.synchronize { @requests.dup }
+      end
+    end.new(poison_kata_id)
+    externals.instance_exec { @http = stub }
+    stub
   end
 
 end
