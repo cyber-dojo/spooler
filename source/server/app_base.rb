@@ -40,11 +40,16 @@ class AppBase < Sinatra::Base
     # the spool and ack 200. It does NOT forward to saver - the drainer does that
     # asynchronously - so the client is never gated on saver's git commit. A
     # malformed (non-JSON) body raises RequestError and maps to 400.
+    #
+    # The ack body is { "<path>": {} }, not a bare {}: web's write client reuses
+    # the shared HttpJson::Responder, which requires the response to carry the
+    # request path as a key. The write is async, so there is no result to report -
+    # the empty object under the path key is just "accepted".
     post "/#{path}" do
       @externals.spool.write(path.to_s, request_body)
       status(200)
       content_type(:json)
-      '{}'
+      { path => {} }.to_json
     end
   end
 

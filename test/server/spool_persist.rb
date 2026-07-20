@@ -12,7 +12,7 @@ class SpoolPersistTest < TestBase
     time_is(1_700_000_000_000)
     response = post_json('/kata_ran_tests', ran_tests_body)
     assert_equal 200, response.status
-    assert_equal '{}', response.body
+    assert_equal '{"kata_ran_tests":{}}', response.body
     assert_empty stub.forwarded
     assert_equal(
       [{ path: 'kata_ran_tests', body: ran_tests_body, kata_id: id58,
