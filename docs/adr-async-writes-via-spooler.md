@@ -91,10 +91,12 @@ is stamped by the browser with `(laptop_id, tab_id, tab_seq)`:
 - The spooler keeps, per `(laptop_id, tab_id, kata)`, the next expected
   `tab_seq`. It releases events to saver in `tab_seq` order, buffering
   out-of-order arrivals until the gap fills.
-- A `tab_seq` that never arrives within a bounded wait is skipped. Because
-  test events are sync-acked (they cannot be silently lost), the only thing that
-  can ever be a missing seq is a fire-and-forget ITE, which is superseded by the
-  next event, so skipping it is always safe.
+- A `tab_seq` that never arrives within a bounded wait is skipped. A test event
+  is sync-acked, so once acked it is buffered and never the missing seq; the
+  usual missing seq is a fire-and-forget ITE, superseded by the next event, so
+  skipping it is safe. (A test POST lost in flight before its ack could also be a
+  missing seq - the same narrow best-effort window as the old direct write;
+  re-firing until acked, a future enhancement, would close it.)
 - `(laptop_id, tab_id, tab_seq)` doubles as the idempotency key: a redelivered or
   re-fired event with the same pair is a no-op at saver.
 
@@ -151,8 +153,12 @@ needs no new field. The full web-side design is
   file state is already in the later event).
 - A lost ITE that was the tip (nothing landed after it) is re-fired, which is a
   plain append at head.
-- A test event cannot be lost: it is sync-acked by the spooler and retried by
-  the browser until acked.
+- A test event is sync-acked: web awaits the spooler's durable ack, so once
+  acked it is buffered and will drain to saver. A test POST lost in flight before
+  that ack is not re-fired - the same narrow best-effort window as the old direct
+  web->saver write, healed by the browser's reconciliation read. Re-firing until
+  acked, which would make a test event unloseable, is a future enhancement (see
+  Possible future enhancements).
 
 ### 7. Spooler storage: embedded SQLite (WAL)
 
@@ -326,14 +332,17 @@ Browser owns a binding index.
   staged AFTER the spooler is proven, not before.
 - New service to build and operate: `spooler`, plus its volume. The standalone
   stack goes from one stateful service to two.
-- The diff-view click reads saver's lagging committed state, so it needs a
-  materialisation spinner/poll for the brief window before an event is queryable
-  at saver. Sync-to-spooler guarantees durability and order, not instant
-  readability at saver.
-- Residual loss window: an event lost in web's fire-and-forget dispatch before
-  it reaches the spooler (much narrower than a saver outage). It is healed by
-  the browser reconciliation read while the tab is open. A test event is not
-  exposed to this window because it is sync-acked.
+- The diff-view click reads saver's lagging committed state, so for the brief
+  window before an event is queryable at saver the diff for that light does not
+  work yet - the same as before the spooler, where a light that never got saved
+  simply had no working diff. Sync-to-spooler guarantees durability and order,
+  not instant readability at saver. A materialisation spinner/poll to smooth over
+  that window is a future enhancement (see Possible future enhancements).
+- Residual loss window: an event lost in web's dispatch before it reaches the
+  spooler (much narrower than a saver outage). It is healed by the browser
+  reconciliation read while the tab is open. A test event is less exposed - web
+  awaits its ack, so it is only at risk in the narrow window before that ack
+  returns; re-firing until acked (a future enhancement) removes even that.
 
 ## Rollout
 
@@ -572,10 +581,17 @@ B1: insert the spooler as a transparent pass-through proxy.
   now authenticate to AWS via OIDC: cyber-dojo enabled GitHub's immutable subject
   claims, so this new repo's token subject is `repo:cyber-dojo@<org-id>/spooler@<repo-id>:*`,
   and the `gh_actions_services` trust in `terraform-base-infra` was updated to
-  match. NOT yet done: the ECS service that runs the spooler with its EBS
-  host_path mount (section 8), deferred until that host volume exists, and
-  repointing web's `saver_service.rb` (web-side) - so nothing yet sends live
-  traffic through it.
+  match.
+  DONE (web): web routes the nine event writes to the spooler. Rather than
+  repoint the single `saver_service.rb`, web adds a `SpoolerService` write client
+  (same construction pattern, over `CYBER_DOJO_SPOOLER_HOSTNAME`/`PORT`) wired
+  through `Externals#spooler`; `app.rb`'s nine write endpoints call it, while
+  reads and the non-event writes (`kata_create`, forks, `kata_option_set`, group
+  ops, diff) stay on `saver_service.rb` direct to saver. The nine write methods
+  were removed from `SaverService`, and the run_tests rescue now catches a
+  `SpoolerService::Error`.
+  NOT yet done: the ECS service that runs the spooler with its EBS host_path
+  mount (section 8), deferred until that host volume exists.
 
 B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   The spooler persists each write to its WAL log before forwarding, still
@@ -695,12 +711,13 @@ B3: durable async via the spooler.
   ITE writes become fire-and-forget to the spooler's durable append; the spooler
   forwards in `tab_seq` order (reorder buffer; skip a never-arriving seq, safe
   because it can only be a superseded ITE). Test writes become synchronous to the
-  spooler's durable ack (not saver's commit) and are retried until acked, so a test
-  event is never lost - this UPGRADES A5's best-effort test writes to durable, and
-  fixes A5's ITE-reordering. Idempotency `(laptop_id, tab_id, tab_seq)` makes redelivery
-  a no-op. The diff-view read may briefly precede saver materialisation (spinner or
-  poll, see Consequences). Gated on A1 (detection already read-side) and B2 (buffer
-  proven).
+  spooler's durable ack (not saver's commit), so a test event is durable once
+  acked (buffered, it will drain) - this UPGRADES A5's best-effort test writes, and
+  fixes A5's ITE-reordering. Re-firing a test POST until acked (closing the
+  in-flight loss window) is deferred (see Possible future enhancements). Idempotency `(laptop_id, tab_id, tab_seq)` makes redelivery
+  a no-op. The diff-view read may briefly precede saver materialisation; smoothing
+  that window with a spinner/poll is a future enhancement (see Possible future
+  enhancements). Gated on A1 (detection already read-side) and B2 (buffer proven).
   The drainer drains the buffer both at startup (rows a previous process left
   undrained) and continuously as writes arrive, retrying a failed forward with
   backoff (see Drainer parameter values); draining on boot is the drainer's job,
@@ -789,11 +806,13 @@ B3: durable async via the spooler.
        in-memory, or a temp file), so a boot-started pool has no shared test
        buffer to drain behind.
     7. web (separate repo). Make test writes synchronous to the spooler's ack and
-       retried until acked FIRST (or in the same deploy), THEN make ITE writes
-       fire-and-forget; add the diff-view materialisation spinner/poll. Reordering
-       becomes possible and test events become durable together here, so the
-       skip-timeout invariant (a missing seq is only ever a superseded ITE) holds
-       the moment skipping can occur.
+       make ITE writes fire-and-forget. Reordering becomes possible here, so the
+       skip-timeout can fire.
+       A skipped seq is normally a superseded ITE; a test event whose POST was lost
+       in flight (before its ack) could also be skipped - the same narrow
+       best-effort window as the old direct web->saver write. Re-firing test writes
+       until acked closes that window and is a future enhancement (see Possible
+       future enhancements).
   DONE (spooler, steps 0-6): the durable async write path is complete on the
   spooler side.
   - Intake. `Spool#write` appends the write to the SQLite buffer (stamping
@@ -815,10 +834,21 @@ B3: durable async via the spooler.
     drain, skip-timeout, drop-late, backoff loop, shard partition); Bk (backoff);
     Dp (a concurrency stress test: many katas x events x N threads deliver every
     write exactly once, each kata in tab_seq order).
-  NOT yet done: step 7 (web-side fire-and-forget ITEs + diff-view materialisation,
-  separate repo); the spooler's ECS service and EBS mount (deployment, see B1); and
-  a client-side integration test (write via the spooler -> drainer -> read back
-  from the compose saver).
+  DONE (web, step 7): the browser's inter-test file events
+  (create/delete/rename/edit) are fire-and-forget - dispatched without awaiting
+  the response, UI continuing immediately - so a file op or [test] no longer
+  blocks on the previous ITE (the old waitForITE serialisation and its callbacks
+  are gone). web sends `tab_seq` as an int, since the spooler orders its buffer
+  by it numerically ('10' < '2' as strings).
+  DONE (spooler): a forward saver REJECTS (a reachable saver returning a non-2xx,
+  eg a write for a kata that does not exist) stalls only its own writer; the
+  other writers in the shard still drain, so one poison write cannot wedge the
+  ordered channel. The pass backs off only when saver is unreachable / failing
+  across the board (a forward raises), never on a per-write rejection.
+  NOT yet done: the spooler's ECS service and EBS mount (deployment, see B1); a
+  client-side integration test (write via the spooler -> drainer -> read back from
+  the compose saver); and dead-lettering a poison write (see Drainer parameter
+  values).
 
 B4: simplify saver to an idempotent append (contract).
   The dedup guard already exists from A8; with the spooler now the single ordered
@@ -829,6 +859,18 @@ B4: simplify saver to an idempotent append (contract).
   pulled forward to A8; keep the dedup in place while removing the reject path, so
   no window double-appends or falsely refuses. Deploy last, after the spooler is
   proven.
+  DONE (saver): `commit_event` is an idempotent append - the `update-ref`
+  compare-and-swap retry, the self-lag re-append, and the loser-rescue are gone;
+  the A8 dedup guard stays. The write methods return nothing: the triple-index
+  position (`index`/`major_index`/`minor_index`) is a read-side concern,
+  polyfilled onto events on read, so `git_commit_tag_sss` and the write-path
+  `major_index` helper are removed, as is `file_edit_before_test_event` (the test
+  methods call `file_edit` directly). The `update-ref` keeps its `base_oid`
+  precondition as a cheap integrity guard (with the spooler the single ordered
+  writer it never loses). `option_set` keeps its own CAS - options are a
+  non-event write, still written concurrently direct web->saver. Tests updated,
+  and `docs/api.md`'s write entries no longer document a returned index. NOT yet
+  done: deploy (last, after the spooler is proven).
 
 ## Drainer parameter values
 
@@ -852,9 +894,11 @@ Decided:
 - skip-timeout = 5s. The reorder buffer holds an out-of-order event waiting for a
   missing `tab_seq`; if the gap has not filled within 5s the drainer releases
   past it. Out-of-order arrivals are expected to be rare, and waiting 5s for that
-  rare case is acceptable. The skip only ever discards an ITE (a test event is
-  sync-acked, so it can never be the missing seq) and a dropped ITE is harmless
-  because the next event's cumulative file set supersedes it.
+  rare case is acceptable. The skip normally discards an ITE (a sync-acked test
+  event is buffered, so once acked it is never the missing seq), and a dropped ITE
+  is harmless because the next event's cumulative file set supersedes it. (A test
+  POST lost before its ack could also be skipped; re-firing until acked - a future
+  enhancement - would close that window.)
 - poll-interval = 250ms. After the drainer drains the buffer (or finds it empty)
   with saver healthy, it sleeps this long before the next pass, and it is the base
   the failure backoff doubles from up to backoff-cap. It bounds drainer-primary
@@ -863,10 +907,17 @@ Decided:
   from intake could replace the poll later (both share one process), but the poll
   meets the budget without the coordination.
 
-Recommended but not yet pinned: backoff jitter; and treating a genuine 4xx
-contract error as park/dead-letter rather than retry-forever, so one poison row
-cannot wedge the ordered channel while transient 5xx/timeout/
-connection-refused failures still retry.
+The drainer now drains each writer independently, so a poison write (a forward
+saver rejects) stalls only its own writer and cannot wedge the ordered channel
+(see B3 DONE); a genuine outage still backs off and retries every writer. So
+one poison row no longer blocks the others - but it is still retried forever.
+
+Recommended but not yet pinned: backoff jitter; and PARKING/dead-lettering such
+a poison write rather than retrying it indefinitely. That needs saver to return
+a genuine 4xx contract error for a write it will never accept (eg a write for a
+nonexistent kata, which saver 500s today) so the drainer can tell a permanent
+rejection - park it - from a transient 5xx/timeout/connection-refused, which
+must keep retrying.
 
 ## Open questions
 
@@ -888,6 +939,36 @@ connection-refused failures still retry.
   never durability (they still land). If N threads on one host are not enough, the
   next step is multiple hosts - the NATS/Valkey fallback in Alternatives
   considered. Measure saver forward latency against realistic peak load to pick N.
+- A held reorder gap backs the shard off. `drain_writer` returns `:failed` (not
+  `:idle`) when it holds a non-skippable gap having forwarded nothing that pass,
+  even though its own docstring says a held gap yields `:idle`. When no other
+  writer in the shard made progress, that `:failed` makes the pass back off
+  (doubling towards the 10s cap) instead of polling at 250ms. So a shard whose
+  only pending work is a writer waiting for a missing lower `tab_seq` reacts to
+  the arriving seq (and to the 5s skip-release) a backoff interval late. It does
+  not affect durability or ordering - the row stays buffered and drains once the
+  gap fills or the skip-timeout releases it - only freshness while a bottom gap
+  is open. Resolve by returning `:idle` for the gap branch (matching the
+  docstring), keeping `:failed` for a genuine forward failure.
+
+## Possible future enhancements
+
+Deferred; each is additive and can land after the spooler is proven.
+
+- Browser re-fire of test writes until acked. A test write is synchronous to the
+  spooler's ack (web awaits it) but is NOT re-fired if the POST is lost in flight
+  before that ack - the same narrow best-effort window the old direct web->saver
+  write always had, healed by the browser's reconciliation read. Re-firing until
+  the spooler acks would make a test event unloseable and restore the strong
+  skip-timeout invariant (a missing seq is then only ever a superseded ITE). Left
+  out for now as over-design: the direct-to-saver write it replaces never retried
+  either, and the residual window is narrow and self-healing.
+
+- Diff-view materialisation spinner/poll. When a light's diff is clicked in the
+  brief window before its event has drained to saver, the diff does not work yet.
+  A spinner or short poll could smooth that window. Left out for now as
+  over-design: before the spooler a light that never got saved simply had no
+  working diff, so a not-yet-materialised diff is no worse than the old behaviour.
 
 ## Future work: a freshness and anomaly API
 

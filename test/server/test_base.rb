@@ -1,6 +1,7 @@
 require_relative 'id58_test_base'
 require_relative 'doubles/saver_http_stub'
 require_relative 'doubles/saver_http_raises'
+require_relative 'doubles/saver_response_stub'
 require_relative 'doubles/time_stub'
 require_relative 'helpers/externals'
 require_relative 'helpers/rack'

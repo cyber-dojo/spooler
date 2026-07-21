@@ -103,19 +103,31 @@ class Drainer
       end
       if seq > @next_expected[writer]
         unless skippable?(event)
-          return progressed ? :progressed : :idle
+          if progressed
+            return :progressed
+          else
+            return :failed
+          end
         end
         @next_expected[writer] = seq
       end
       response = forward(event)
       unless response && drained?(response)
-        return progressed ? :progressed : :failed
+        if progressed
+          return :progressed
+        else
+          return :failed
+        end
       end
       @externals.db.delete(event['id'])
       @next_expected[writer] = seq + 1
       progressed = true
     end
-    progressed ? :progressed : :idle
+    if progressed
+      return :progressed
+    else
+      return :idle
+    end
   end
 
   def skippable?(event)

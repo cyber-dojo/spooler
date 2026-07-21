@@ -2,6 +2,11 @@ require_relative 'test_base'
 
 class DrainerTest < TestBase
 
+  # TODO: For these tests I think it would be better if the database data started from
+  # a standardized sequence of N good events. Then for tests where the events are
+  # anomalous in some way, there would be explicit statements writing the anamoly
+  # into this data, just before it is seeded into the db.
+
   test 'Dn0001', %w(
   | drain forwards every buffered write to saver, oldest first, deletes each one
   | saver acks (2xx), and returns true (the pass hit no failure)
@@ -17,6 +22,7 @@ class DrainerTest < TestBase
     assert_empty db.buffered_events
   end
 
+  #TODO: If a 500 really an instance of a failed ack?
   test 'Dn0002', %w(
   | drain leaves a write buffered when saver does not ack it (500), and returns
   | false so the loop knows saver is failing
@@ -185,8 +191,10 @@ class DrainerTest < TestBase
               kata_id: poison, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
     db.append(path: 'kata_ran_tests', body: %({"id":"#{healthy}"}),
               kata_id: healthy, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1001)
+
     saver_rejects_kata(poison)
     externals.drainer.drain
+
     assert_equal [poison], db.buffered_events.map { |event| event['kata_id'] },
       'the healthy write must drain even though the poison write is rejected'
   end
@@ -209,6 +217,61 @@ class DrainerTest < TestBase
     assert_empty db.buffered_events
   end
 
+  test 'Dn0012', %w(
+  When drainer drains at least one write, its response is :progressed
+  ) do
+    db = in_memory_db
+    db.append(path: 'kata_ran_tests', body: %({"id":"AbCd3E"}),
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1001)
+    db.append(path: 'kata_edit', body: %({"id":"AbCd3E"}),
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2, enqueued_at: 2001)
+    responses = [
+      SaverResponseStub.new(code: 200, body: '{}'),
+      SaverResponseStub.new(code: 500, body: '{}')
+    ]
+    stub = saver_responses(responses)
+
+    assert externals.drainer.drain
+
+    #TODO: assert state of db & saver.forwarded
+    assert_equal 1, db.buffered_events.size
+    assert_equal "kata_edit", db.buffered_events[0]['path']
+
+    #assert_equal 1, stub.forwarded.size
+    #assert_equal "/kata_ran_tests", stub.forwarded[0].path
+  end
+
+  test 'Dn0013', %w(
+  When drainer gets to an ahead of sequence event 
+  which is not skippable, an no events are consumed
+  it response is :failed, and the drain returns false
+  ) do
+    db = in_memory_db
+    db.append(path: 'kata_ran_tests', body: %({"id":"AbCd3E"}),
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1001)
+
+    stub = saver_returns(200, '{}')
+
+    assert externals.drainer.drain
+    
+    assert_equal 0, db.buffered_events.size
+    assert_equal 1, stub.forwarded.size
+    assert_equal "/kata_ran_tests", stub.forwarded[0].path
+
+    held_at = 2001
+    db.append(path: 'kata_edit', body: %({"id":"AbCd3E"}),
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 3, enqueued_at: held_at)
+    time_is(held_at + Drainer::SKIP_TIMEOUT_MS - 1) # still skippable
+
+    refute externals.drainer.drain
+
+    assert_equal 1, db.buffered_events.size
+    assert_equal "kata_edit", db.buffered_events[0]['path']
+
+    assert_equal 1, stub.forwarded.size
+    assert_equal "/kata_ran_tests", stub.forwarded[0].path
+  end
+
   private
 
   # An http transport (the Externals#http seam) that answers a forwarded write
@@ -220,20 +283,34 @@ class DrainerTest < TestBase
       def initialize(poison)
         @poison = poison
         @requests = []
-        @mutex = Mutex.new
       end
       def new(_hostname, _port)
         self
       end
       def request(request)
-        @mutex.synchronize { @requests << request }
         code = request.body.include?(@poison) ? 500 : 200
         SaverResponseStub.new(code: code, body: '{}')
       end
-      def requests
-        @mutex.synchronize { @requests.dup }
-      end
     end.new(poison_kata_id)
+    externals.instance_exec { @http = stub }
+    stub
+  end
+
+  def saver_responses(responses)
+    stub = Class.new do
+      def initialize(responses)
+        @responses = responses
+        @index = 0
+      end
+      def new(_hostname, _port)
+        self
+      end
+      def request(request)
+        response = @responses[@index]
+        @index += 1
+        response
+      end
+    end.new(responses)
     externals.instance_exec { @http = stub }
     stub
   end
