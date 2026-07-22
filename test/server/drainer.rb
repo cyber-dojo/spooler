@@ -8,8 +8,8 @@ class DrainerTest < TestBase
   # into this data, just before it is seeded into the db.
 
   test 'Dn0001', %w(
-  | drain forwards every buffered write to saver, oldest first, deletes each one
-  | saver acks (2xx), and returns true (the pass hit no failure)
+  | drain forwards every buffered write to saver, oldest first, and deletes each
+  | as it is sent (delete-on-send)
   ) do
     db = in_memory_db
     db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
@@ -17,49 +17,22 @@ class DrainerTest < TestBase
     db.append(path: 'kata_file_edit', body: '{"id":"AbCd3E"}',
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2, enqueued_at: 2000)
     stub = saver_returns(200, '{}')
-    assert externals.drainer.drain
+    externals.drainer.drain
     assert_equal %w(/kata_ran_tests /kata_file_edit), stub.forwarded.map(&:path)
     assert_empty db.buffered_events
   end
 
-  #TODO: If a 500 really an instance of a failed ack?
-  test 'Dn0002', %w(
-  | drain leaves a write buffered when saver does not ack it (500), and returns
-  | false so the loop knows saver is failing
-  ) do
-    db = in_memory_db
-    db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
-              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
-    saver_returns(500, '{"exception":"saver down"}')
-    refute externals.drainer.drain
-    assert_equal 1, db.buffered_events.size
-  end
-
-  test 'Dn0003', %w(
-  | drain stops the pass on the first failure: a 500 on the first row means the
-  | second is not even attempted, and both stay buffered
-  ) do
-    db = in_memory_db
-    db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
-              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
-    db.append(path: 'kata_file_edit', body: '{"id":"AbCd3E"}',
-              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2, enqueued_at: 2000)
-    stub = saver_returns(500, '{"exception":"saver down"}')
-    refute externals.drainer.drain
-    assert_equal 1, stub.forwarded.size
-    assert_equal 2, db.buffered_events.size
-  end
-
   test 'Dn0004', %w(
-  | drain treats a forward that raises (saver unreachable) as a failure: it does
-  | not raise, leaves the row buffered, and returns false
+  | a forward that raises (saver unreachable) does not raise out of drain, and the
+  | row is deleted anyway: delivery is fire-and-forget, so an unreachable saver
+  | loses the write rather than wedging the drain thread
   ) do
     db = in_memory_db
     db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
     saver_raises(Errno::ECONNREFUSED)
-    refute externals.drainer.drain
-    assert_equal 1, db.buffered_events.size
+    externals.drainer.drain
+    assert_empty db.buffered_events
   end
 
   test 'Dn0005', %w(
@@ -73,7 +46,7 @@ class DrainerTest < TestBase
     db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 8002)
     stub = saver_returns(200, '{}')
-    assert externals.drainer.drain
+    externals.drainer.drain
     assert_equal %w(/kata_ran_tests /kata_file_edit), stub.forwarded.map(&:path)
     assert_empty db.buffered_events
   end
@@ -91,7 +64,7 @@ class DrainerTest < TestBase
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 3, enqueued_at: held_at)
     time_is(held_at + Drainer::SKIP_TIMEOUT_MS - 1) # gap still younger than the timeout
     stub = saver_returns(200, '{}')
-    assert externals.drainer.drain
+    externals.drainer.drain
     assert_equal %w(/kata_ran_tests), stub.forwarded.map(&:path)
     assert_equal [3], db.buffered_events.map { |event| event['tab_seq'] }
   end
@@ -108,7 +81,7 @@ class DrainerTest < TestBase
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 3, enqueued_at: held_at)
     time_is(held_at + Drainer::SKIP_TIMEOUT_MS) # gap has reached the timeout
     stub = saver_returns(200, '{}')
-    assert externals.drainer.drain
+    externals.drainer.drain
     assert_equal %w(/kata_ran_tests /kata_file_edit), stub.forwarded.map(&:path)
     assert_empty db.buffered_events
   end
@@ -138,28 +111,9 @@ class DrainerTest < TestBase
     refute_includes stub.forwarded.map(&:path), '/kata_file_delete'
   end
 
-  test 'Dn0009', %w(
-  | run drains repeatedly, sleeping a backoff that doubles from the poll interval
-  | while saver keeps failing; stop ends the loop
-  ) do
-    db = in_memory_db
-    db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
-              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
-    saver_returns(500, '{"exception":"saver down"}')
-    drainer = externals.drainer
-    sleeps = []
-    sleeper = lambda do |ms|
-      sleeps << ms
-      drainer.stop if sleeps.size == 4
-    end
-    drainer.run(sleeper: sleeper)
-    poll = Drainer::POLL_INTERVAL_MS
-    assert_equal [poll, poll * 2, poll * 4, poll * 8], sleeps
-  end
-
   test 'Dn0010', %w(
-  | run sleeps the poll interval on each healthy pass (no backoff when saver acks
-  | or there is nothing to drain)
+  | run drains then sleeps the poll interval between passes, until stop ends the
+  | loop
   ) do
     db = in_memory_db
     db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
@@ -174,29 +128,6 @@ class DrainerTest < TestBase
     drainer.run(sleeper: sleeper)
     poll = Drainer::POLL_INTERVAL_MS
     assert_equal [poll, poll, poll], sleeps
-  end
-
-  test 'Dn00P1', %w(
-  | a write saver rejects (a reachable saver returning a non-2xx - eg a poison
-  | write for a kata that does not exist) stalls only its own writer: the other
-  | writers in the shard still drain, so one poison write cannot wedge the channel.
-  | The poison write stays buffered (retried on a later pass), it is not lost.
-  ) do
-    db = in_memory_db
-    poison  = 'PoIsN1'
-    healthy = 'HeaLtH'
-    # poison enqueued first, so a stop-on-first-failure pass would give up before
-    # ever reaching the healthy writer.
-    db.append(path: 'kata_ran_tests', body: %({"id":"#{poison}"}),
-              kata_id: poison, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
-    db.append(path: 'kata_ran_tests', body: %({"id":"#{healthy}"}),
-              kata_id: healthy, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1001)
-
-    saver_rejects_kata(poison)
-    externals.drainer.drain
-
-    assert_equal [poison], db.buffered_events.map { |event| event['kata_id'] },
-      'the healthy write must drain even though the poison write is rejected'
   end
 
   test 'Dn0011', %w(
@@ -217,100 +148,24 @@ class DrainerTest < TestBase
     assert_empty db.buffered_events
   end
 
-  test 'Dn0012', %w(
-  When drainer drains at least one write, its response is :progressed
-  ) do
-    db = in_memory_db
-    db.append(path: 'kata_ran_tests', body: %({"id":"AbCd3E"}),
-              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1001)
-    db.append(path: 'kata_edit', body: %({"id":"AbCd3E"}),
-              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2, enqueued_at: 2001)
-    responses = [
-      SaverResponseStub.new(code: 200, body: '{}'),
-      SaverResponseStub.new(code: 500, body: '{}')
-    ]
-    stub = saver_responses(responses)
-
-    assert externals.drainer.drain
-
-    #TODO: assert state of db & saver.forwarded
-    assert_equal 1, db.buffered_events.size
-    assert_equal "kata_edit", db.buffered_events[0]['path']
-
-    #assert_equal 1, stub.forwarded.size
-    #assert_equal "/kata_ran_tests", stub.forwarded[0].path
-  end
-
-  test 'Dn0013', %w(
-  When drainer gets to an ahead of sequence event 
-  which is not skippable, an no events are consumed
-  it response is :failed, and the drain returns false
-  ) do
-    db = in_memory_db
-    db.append(path: 'kata_ran_tests', body: %({"id":"AbCd3E"}),
-              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1001)
-
-    stub = saver_returns(200, '{}')
-
-    assert externals.drainer.drain
-    
-    assert_equal 0, db.buffered_events.size
-    assert_equal 1, stub.forwarded.size
-    assert_equal "/kata_ran_tests", stub.forwarded[0].path
-
-    held_at = 2001
-    db.append(path: 'kata_edit', body: %({"id":"AbCd3E"}),
-              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 3, enqueued_at: held_at)
-    time_is(held_at + Drainer::SKIP_TIMEOUT_MS - 1) # still skippable
-
-    refute externals.drainer.drain
-
-    assert_equal 1, db.buffered_events.size
-    assert_equal "kata_edit", db.buffered_events[0]['path']
-
-    assert_equal 1, stub.forwarded.size
-    assert_equal "/kata_ran_tests", stub.forwarded[0].path
-  end
-
   private
 
-  # An http transport (the Externals#http seam) that answers a forwarded write
-  # with 500 when its body is for poison_kata_id (a reachable saver refusing a
-  # write that will never succeed) and 200 for every other kata. Lets a test
-  # prove a poison writer does not block the healthy writers draining.
-  def saver_rejects_kata(poison_kata_id)
+  # An http transport (the Externals#http seam) whose every forwarded request
+  # raises, standing in for saver being unreachable. Lets a test prove a raised
+  # forward is swallowed by the drainer and the row is deleted anyway
+  # (fire-and-forget delivery is best-effort, not retried).
+  def saver_raises(error)
     stub = Class.new do
-      def initialize(poison)
-        @poison = poison
-        @requests = []
+      def initialize(error)
+        @error = error
       end
       def new(_hostname, _port)
         self
       end
-      def request(request)
-        code = request.body.include?(@poison) ? 500 : 200
-        SaverResponseStub.new(code: code, body: '{}')
+      def request(_request)
+        raise @error
       end
-    end.new(poison_kata_id)
-    externals.instance_exec { @http = stub }
-    stub
-  end
-
-  def saver_responses(responses)
-    stub = Class.new do
-      def initialize(responses)
-        @responses = responses
-        @index = 0
-      end
-      def new(_hostname, _port)
-        self
-      end
-      def request(request)
-        response = @responses[@index]
-        @index += 1
-        response
-      end
-    end.new(responses)
+    end.new(error)
     externals.instance_exec { @http = stub }
     stub
   end

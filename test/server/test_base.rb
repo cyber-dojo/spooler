@@ -1,6 +1,5 @@
 require_relative 'id58_test_base'
 require_relative 'doubles/saver_http_stub'
-require_relative 'doubles/saver_http_raises'
 require_relative 'doubles/saver_response_stub'
 require_relative 'doubles/time_stub'
 require_relative 'helpers/externals'
@@ -38,14 +37,6 @@ class TestBase < Id58TestBase
     # Inject a stub http transport so a write reaches a canned saver response
     # instead of a real saver.
     stub = SaverHttpStub.new(SaverResponseStub.new(code: code, body: body))
-    externals.instance_exec { @http = stub }
-    stub
-  end
-
-  def saver_raises(error)
-    # Inject an http transport that raises on every request, simulating saver
-    # being unreachable (the forward raises rather than returning a response).
-    stub = SaverHttpRaises.new(error)
     externals.instance_exec { @http = stub }
     stub
   end
