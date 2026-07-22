@@ -13,16 +13,18 @@ class AppBase < Sinatra::Base
   set :port, ENV['PORT']
   set :host_authorization, { permitted_hosts: [] } # https://github.com/sinatra/sinatra/issues/2065#issuecomment-2484285707
 
-  def initialize(externals)
-    # Hold the injected service locator and boot Sinatra.
-    @externals = externals
+  def initialize(model)
+    # Hold the injected domain model (spool, prober) and boot Sinatra. The model
+    # is this service's own logic; it reaches the outward boundary (db, time,
+    # http) through the Externals it was built from.
+    @model = model
     super(nil)
   end
 
   # - - - - - - - - - - - - - - - - - - - - - -
 
   def self.get_json(klass_name, method_name)
-    # Register a GET route that dispatches to externals.klass_name.method_name.
+    # Register a GET route that dispatches to model.klass_name.method_name.
     get "/#{method_name}", provides:[:json] do
       respond_to do |format|
         format.json do
@@ -46,7 +48,7 @@ class AppBase < Sinatra::Base
     # request path as a key. The write is async, so there is no result to report -
     # the empty object under the path key is just "accepted".
     post "/#{path}" do
-      @externals.spool.write(path.to_s, request_body)
+      @model.spool.write(path.to_s, request_body)
       status(200)
       content_type(:json)
       { path => {} }.to_json
@@ -62,7 +64,7 @@ class AppBase < Sinatra::Base
     # Call the named collaborator method with the request args and
     # wrap its return value as { method_name => result } JSON.
     named_args = Hash[args.map{ |key,value| [key.to_sym, value] }]
-    target = @externals.public_send(klass_name)
+    target = @model.public_send(klass_name)
     result = target.public_send(method_name, **named_args)
     content_type(:json)
     { method_name.to_s => result }.to_json

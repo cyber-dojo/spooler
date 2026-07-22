@@ -13,6 +13,7 @@ end
 
 require_relative '../app'
 require_relative '../externals'
+require_relative '../model'
 require_relative '../drainer_pool'
 externals = Externals.new
 
@@ -24,4 +25,4 @@ externals = Externals.new
 drainer_shard_count = (ENV['CYBER_DOJO_SPOOLER_DRAINER_SHARDS'] || '4').to_i
 DrainerPool.new(externals, shard_count: drainer_shard_count).start
 
-run App.new(externals)
+run App.new(Model.new(externals))

@@ -2,9 +2,9 @@ require_relative 'app_base'
 
 class App < AppBase
 
-  def initialize(externals)
-    # Wire the routing table onto the injected service locator.
-    super(externals)
+  def initialize(model)
+    # Wire the routing table onto the injected domain model.
+    super(model)
   end
 
   get_json(:prober, :alive?)

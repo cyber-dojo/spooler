@@ -1,9 +1,6 @@
 require 'net/http'
-require_relative 'drainer'
 require_relative 'external/db'
 require_relative 'external/time'
-require_relative 'prober'
-require_relative 'spool'
 
 class Externals
 
@@ -19,26 +16,11 @@ class Externals
     @db ||= External::Db.new('/sqlite/spooler.db')
   end
 
-  def drainer
-    # Forwards buffered writes to saver in the background, deleting each on ack.
-    @drainer ||= Drainer.new(self)
-  end
-
   def http
     # The HTTP transport class injected into downstream clients. Defaulting
     # to Net::HTTP (a class answering .new(hostname, port).request(req)) lets
     # tests swap in a low-level stub.
     @http ||= Net::HTTP
-  end
-
-  def prober
-    # The liveness/readiness/sha probe collaborator.
-    @prober ||= Prober.new
-  end
-
-  def spool
-    # The model that persists each write to the buffer and forwards it to saver.
-    @spool ||= Spool.new(self)
   end
 
 end
