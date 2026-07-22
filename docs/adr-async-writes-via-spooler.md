@@ -91,10 +91,12 @@ is stamped by the browser with `(laptop_id, tab_id, tab_seq)`:
 - The spooler keeps, per `(laptop_id, tab_id, kata)`, the next expected
   `tab_seq`. It releases events to saver in `tab_seq` order, buffering
   out-of-order arrivals until the gap fills.
-- A `tab_seq` that never arrives within a bounded wait is skipped. Because
-  test events are sync-acked (they cannot be silently lost), the only thing that
-  can ever be a missing seq is a fire-and-forget ITE, which is superseded by the
-  next event, so skipping it is always safe.
+- A `tab_seq` that never arrives within a bounded wait is skipped. A test event
+  is sync-acked, so once acked it is buffered and never the missing seq; the
+  usual missing seq is a fire-and-forget ITE, superseded by the next event, so
+  skipping it is safe. (A test POST lost in flight before its ack could also be a
+  missing seq - the same narrow best-effort window as the old direct write;
+  re-firing until acked, a future enhancement, would close it.)
 - `(laptop_id, tab_id, tab_seq)` doubles as the idempotency key: a redelivered or
   re-fired event with the same pair is a no-op at saver.
 
@@ -151,8 +153,13 @@ needs no new field. The full web-side design is
   file state is already in the later event).
 - A lost ITE that was the tip (nothing landed after it) is re-fired, which is a
   plain append at head.
-- A test event cannot be lost: it is sync-acked by the spooler and retried by
-  the browser until acked.
+- A test event is sync-acked at intake: web awaits the spooler's durable ack, so
+  the write is persisted in the WAL buffer before web continues. Delivery onward
+  to saver is best-effort: the drainer forwards each buffered event once and does
+  not check saver's response, so a forward lost while saver is unavailable is not
+  retried. Guaranteed delivery to saver (a drainer that acks and retries, plus
+  re-firing a test POST lost before its intake ack) is a future enhancement (see
+  async-writes-future-enhancements.md).
 
 ### 7. Spooler storage: embedded SQLite (WAL)
 
@@ -326,14 +333,19 @@ Browser owns a binding index.
   staged AFTER the spooler is proven, not before.
 - New service to build and operate: `spooler`, plus its volume. The standalone
   stack goes from one stateful service to two.
-- The diff-view click reads saver's lagging committed state, so it needs a
-  materialisation spinner/poll for the brief window before an event is queryable
-  at saver. Sync-to-spooler guarantees durability and order, not instant
-  readability at saver.
-- Residual loss window: an event lost in web's fire-and-forget dispatch before
-  it reaches the spooler (much narrower than a saver outage). It is healed by
-  the browser reconciliation read while the tab is open. A test event is not
-  exposed to this window because it is sync-acked.
+- The diff-view click reads saver's lagging committed state, so for the brief
+  window before an event is queryable at saver the diff for that light does not
+  work yet - the same as before the spooler, where a light that never got saved
+  simply had no working diff. Sync-to-spooler gives a durable, ordered intake,
+  not instant readability at saver. A materialisation spinner/poll to smooth over
+  that window is a future enhancement (see async-writes-future-enhancements.md).
+- Residual loss windows: (a) an event lost in web's dispatch before it reaches the
+  spooler, and (b) a forward the drainer sends while saver is unavailable, which
+  fire-and-forget does not retry. A superseded ITE lost either way is healed by the
+  browser reconciliation read while the tab is open; a lost test event's committed
+  light is not recoverable that way. Guaranteed delivery to saver closes window (b)
+  and re-firing a test POST until its intake ack closes window (a); both are future
+  enhancements (see async-writes-future-enhancements.md).
 
 ## Rollout
 
@@ -572,10 +584,17 @@ B1: insert the spooler as a transparent pass-through proxy.
   now authenticate to AWS via OIDC: cyber-dojo enabled GitHub's immutable subject
   claims, so this new repo's token subject is `repo:cyber-dojo@<org-id>/spooler@<repo-id>:*`,
   and the `gh_actions_services` trust in `terraform-base-infra` was updated to
-  match. NOT yet done: the ECS service that runs the spooler with its EBS
-  host_path mount (section 8), deferred until that host volume exists, and
-  repointing web's `saver_service.rb` (web-side) - so nothing yet sends live
-  traffic through it.
+  match.
+  DONE (web): web routes the nine event writes to the spooler. Rather than
+  repoint the single `saver_service.rb`, web adds a `SpoolerService` write client
+  (same construction pattern, over `CYBER_DOJO_SPOOLER_HOSTNAME`/`PORT`) wired
+  through `Externals#spooler`; `app.rb`'s nine write endpoints call it, while
+  reads and the non-event writes (`kata_create`, forks, `kata_option_set`, group
+  ops, diff) stay on `saver_service.rb` direct to saver. The nine write methods
+  were removed from `SaverService`, and the run_tests rescue now catches a
+  `SpoolerService::Error`.
+  NOT yet done: the ECS service that runs the spooler with its EBS host_path
+  mount (section 8), deferred until that host volume exists.
 
 B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   The spooler persists each write to its WAL log before forwarding, still
@@ -611,8 +630,7 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
   note's "deleted after ack"). A write saver rejects with 500 stays in the buffer
   (undrained); in B2 (synchronous forward, no drainer) it is re-forwarded only
   when its writer retries the write (deduped to the same buffered row by its key).
-  Draining a stuck backlog - on boot and continuously, retrying with backoff - is
-  the B3 drainer, not B2.
+  Draining a stuck backlog - on boot and continuously - is the B3 drainer, not B2.
   PLAN (B2): steps, each red-test first, behaviour staying synchronous throughout
   (no reorder buffer, skip-timeout, fire-and-forget, or background drainer - those
   are B3). B2 only inserts a durable buffer beneath the existing verbatim relay;
@@ -668,8 +686,9 @@ B2: durable intake in the spooler (SQLite WAL), still synchronous forward.
     A8 key.
   - Non-JSON reject. A write whose body is not JSON is refused at intake with 400
     (`Spool` raises `RequestError`) and is neither persisted nor forwarded: an
-    unparseable request can never become a valid saver write, so buffering it would
-    leave a poison row that never drains (saver would 400 it anyway).
+    unparseable request can never become a valid saver write, so it is rejected
+    synchronously at intake rather than buffered and later dropped when saver
+    rejects it.
   - synchronous left at the SQLite default (FULL). A laptop benchmark put FULL's
     fsync-bound ceiling at ~13k-24k single-row commits/sec (NORMAL ~3-4x higher),
     far above expected load; but the laptop overstates FULL (macOS `fsync` is not
@@ -695,16 +714,17 @@ B3: durable async via the spooler.
   ITE writes become fire-and-forget to the spooler's durable append; the spooler
   forwards in `tab_seq` order (reorder buffer; skip a never-arriving seq, safe
   because it can only be a superseded ITE). Test writes become synchronous to the
-  spooler's durable ack (not saver's commit) and are retried until acked, so a test
-  event is never lost - this UPGRADES A5's best-effort test writes to durable, and
-  fixes A5's ITE-reordering. Idempotency `(laptop_id, tab_id, tab_seq)` makes redelivery
-  a no-op. The diff-view read may briefly precede saver materialisation (spinner or
-  poll, see Consequences). Gated on A1 (detection already read-side) and B2 (buffer
-  proven).
-  The drainer drains the buffer both at startup (rows a previous process left
-  undrained) and continuously as writes arrive, retrying a failed forward with
-  backoff (see Drainer parameter values); draining on boot is the drainer's job,
-  not a step of its own. A real `saver` is already wired into the test compose
+  spooler's durable ack (not saver's commit), so a test event is durably buffered
+  once acked; the drainer then forwards it to saver best-effort - this UPGRADES
+  A5's test-write intake to durable, and fixes A5's ITE-reordering. Re-firing a test POST until acked (closing the
+  in-flight loss window) is deferred (see async-writes-future-enhancements.md). Idempotency `(laptop_id, tab_id, tab_seq)` makes redelivery
+  a no-op. The diff-view read may briefly precede saver materialisation; smoothing
+  that window with a spinner/poll is a future enhancement (see
+  async-writes-future-enhancements.md). Gated on A1 (detection already read-side) and B2 (buffer proven).
+  The drainer forwards the buffer both at startup (rows a previous process left
+  un-forwarded) and continuously as writes arrive, sending each row once without
+  reading saver's response (fire-and-forget, see Drainer parameter values);
+  forwarding on boot is the drainer's job, not a step of its own. A real `saver` is already wired into the test compose
   (see B2 DONE) so the drainer can be integration-tested end-to-end.
   DESIGN (B3): intake and forwarding are separate concerns.
   - Intake. `Spool#write` appends the write to the buffer and returns an ack (a
@@ -714,11 +734,12 @@ B3: durable async via the spooler.
     stay here.
   - Forwarding. The drainer reads the buffer and forwards per `(kata_id, laptop_id)`
     in `tab_seq` order (laptop_id already encodes tab_id - there is no separate
-    tab_id column), deletes each row saver acks (delete-on-ack), and retries a
-    failed forward with backoff. Ordering uses an in-memory next-expected `tab_seq`
-    per `(kata_id, laptop_id)`, held by the owning shard thread and seeded at first
-    sight from the lowest buffered seq (delete-on-ack removes forwarded rows, so the
-    buffer alone cannot tell a bottom gap from an already-forwarded prefix). The
+    tab_id column), deleting each row as it sends it without reading saver's
+    response (delete-on-send, fire-and-forget). Ordering uses an in-memory
+    next-expected `tab_seq` per `(kata_id, laptop_id)`, held by the owning shard
+    thread and seeded at first sight from the lowest buffered seq (delete-on-send
+    removes forwarded rows, so the buffer alone cannot tell a bottom gap from an
+    already-forwarded prefix). The
     SQLite buffer plus that pointer IS the reorder buffer - there is no separate
     in-memory queue of rows; a gap is held until it fills or its held row's `enqueued_at`
     enqueue timestamp is older than the skip-timeout. The `Db` buffer is the only
@@ -757,9 +778,8 @@ B3: durable async via the spooler.
     0. Single-threaded spooler. `workers Etc.nprocessors` -> threaded single mode,
        keeping the one shared SQLite connection. Behaviour-neutral, reversible.
        DONE.
-    1. Robust drain pass. `Drainer#drain` forwards buffered rows in order, deletes
-       each on ack, rescues a failed forward, STOPS the pass on the first failure,
-       and returns an ok/failing outcome for the loop to act on.
+    1. Drain pass. `Drainer#drain` forwards buffered rows in order and deletes each
+       as it sends it, without reading saver's response.
     2. Enqueue timestamp + clock. Add a `enqueued_at` column and an injectable time seam;
        intake stamps `enqueued_at` on append. Behaviour-neutral (unused until step 3), but a
        prerequisite: skip-timeout has nothing to measure against without `enqueued_at`.
@@ -768,10 +788,9 @@ B3: durable async via the spooler.
        lowest buffered seq); hold a gap and skip it once the held row's `enqueued_at` is
        older than the skip-timeout (5s). Single Drainer; inert in production until
        arrivals can be out of order (step 7).
-    4. Drain loop. Repeat drain, sleeping the poll-interval (250ms) when healthy or
-       the failure backoff (250ms doubling to the 10s cap) chosen from the pass
-       outcome. An injectable sleeper and a stop-after-N hook keep it testable;
-       no threads yet.
+    4. Drain loop. Repeat drain, sleeping the poll-interval (250ms) between passes.
+       An injectable sleeper and a stop-after-N hook keep it testable; no threads
+       yet.
     5. Shard the drainer. `Drainer.shard_of` (a stable CRC32, not String#hash)
        assigns each kata to one of N worker Drainers; a DrainerPool runs each in a
        background thread over its shard, with graceful stop. A concurrency stress
@@ -779,7 +798,7 @@ B3: durable async via the spooler.
        reaches saver exactly once and per-`(kata_id, laptop_id)` `tab_seq` order
        holds. The pool is built and stress-tested here; it is started at boot in
        step 6, paired with the intake flip. Still additive: intake forwards
-       synchronously, so the pool only retries rows a synchronous forward stranded.
+       synchronously, so the pool only forwards rows a synchronous forward stranded.
     6. Intake append-only (contract), and start the pool at boot. `Spool#write`
        appends (stamping `enqueued_at`) and returns a bare 200 ack, dropping the
        synchronous forward+delete; the DrainerPool, started at boot, is the sole
@@ -789,11 +808,13 @@ B3: durable async via the spooler.
        in-memory, or a temp file), so a boot-started pool has no shared test
        buffer to drain behind.
     7. web (separate repo). Make test writes synchronous to the spooler's ack and
-       retried until acked FIRST (or in the same deploy), THEN make ITE writes
-       fire-and-forget; add the diff-view materialisation spinner/poll. Reordering
-       becomes possible and test events become durable together here, so the
-       skip-timeout invariant (a missing seq is only ever a superseded ITE) holds
-       the moment skipping can occur.
+       make ITE writes fire-and-forget. Reordering becomes possible here, so the
+       skip-timeout can fire.
+       A skipped seq is normally a superseded ITE; a test event whose POST was lost
+       in flight (before its ack) could also be skipped - the same narrow
+       best-effort window as the old direct web->saver write. Re-firing test writes
+       until acked closes that window and is a future enhancement (see
+       async-writes-future-enhancements.md).
   DONE (spooler, steps 0-6): the durable async write path is complete on the
   spooler side.
   - Intake. `Spool#write` appends the write to the SQLite buffer (stamping
@@ -803,22 +824,32 @@ B3: durable async via the spooler.
     CRC32), started at boot in `config.ru`, forwards buffered writes to saver: per
     writer `(kata_id, laptop_id)` in `tab_seq` order via an in-memory next-expected
     pointer (seeded at first sight), holding a gap and skipping it once it ages past
-    `SKIP_TIMEOUT_MS`, dropping a late below-expected seq, deleting each row on ack,
-    and retrying a failed forward with a `Backoff` (`POLL_INTERVAL_MS` base doubling
-    to `BACKOFF_CAP_MS`). Starting drains any rows a previous process left undrained
-    (crash recovery); it then runs continuously.
+    `SKIP_TIMEOUT_MS`, dropping a late below-expected seq, and deleting each row as
+    it sends it without reading saver's response (delete-on-send, fire-and-forget).
+    Passes are paced by `POLL_INTERVAL_MS`. Starting forwards any rows a previous
+    process left un-forwarded (crash recovery); it then runs continuously.
   - One process (step 0). puma runs one threaded process, so the shared SQLite
     connection is gem-serialised (THREADSAFE=1) and the drainer is a fixed set of
     in-process threads.
   - Tested. Db (open/WAL/busy_timeout, append/read/delete/dedup/enqueued_at); Sp
     (append + ack + not-forwarded, non-JSON 400, dedup, all endpoints); Dn (ordered
-    drain, skip-timeout, drop-late, backoff loop, shard partition); Bk (backoff);
+    drain, skip-timeout, drop-late, shard partition);
     Dp (a concurrency stress test: many katas x events x N threads deliver every
     write exactly once, each kata in tab_seq order).
-  NOT yet done: step 7 (web-side fire-and-forget ITEs + diff-view materialisation,
-  separate repo); the spooler's ECS service and EBS mount (deployment, see B1); and
-  a client-side integration test (write via the spooler -> drainer -> read back
-  from the compose saver).
+  DONE (web, step 7): the browser's inter-test file events
+  (create/delete/rename/edit) are fire-and-forget - dispatched without awaiting
+  the response, UI continuing immediately - so a file op or [test] no longer
+  blocks on the previous ITE (the old waitForITE serialisation and its callbacks
+  are gone). web sends `tab_seq` as an int, since the spooler orders its buffer
+  by it numerically ('10' < '2' as strings).
+  DONE (spooler): the drainer is fire-and-forget - it forwards each buffered row
+  once, in `tab_seq` order, and deletes it without reading saver's response, so
+  there is no ack check, retry, backoff, or poison-write handling. A forward lost
+  while saver is unavailable is not retried; guaranteed delivery is a future
+  enhancement (see async-writes-future-enhancements.md).
+  NOT yet done: the spooler's ECS service and EBS mount (deployment, see B1); and a
+  client-side integration test (write via the spooler -> drainer -> read back from
+  the compose saver).
 
 B4: simplify saver to an idempotent append (contract).
   The dedup guard already exists from A8; with the spooler now the single ordered
@@ -829,44 +860,51 @@ B4: simplify saver to an idempotent append (contract).
   pulled forward to A8; keep the dedup in place while removing the reject path, so
   no window double-appends or falsely refuses. Deploy last, after the spooler is
   proven.
+  DONE (saver): `commit_event` is an idempotent append - the `update-ref`
+  compare-and-swap retry, the self-lag re-append, and the loser-rescue are gone;
+  the A8 dedup guard stays. The write methods return nothing: the triple-index
+  position (`index`/`major_index`/`minor_index`) is a read-side concern,
+  polyfilled onto events on read, so `git_commit_tag_sss` and the write-path
+  `major_index` helper are removed, as is `file_edit_before_test_event` (the test
+  methods call `file_edit` directly). The `update-ref` keeps its `base_oid`
+  precondition as a cheap integrity guard (with the spooler the single ordered
+  writer it never loses). `option_set` keeps its own CAS - options are a
+  non-event write, still written concurrently direct web->saver. Tests updated,
+  and `docs/api.md`'s write entries no longer document a returned index. NOT yet
+  done: deploy (last, after the spooler is proven).
 
 ## Drainer parameter values
 
-Both knobs below bound the queue dwell (enqueue to forward) and are sized
-against the ~5s read eventual-consistency budget. They are injected config; the
-values here are the defaults. The dominant scenario that sets the budget is a
-group kata: many participants write events for ~30 min then stop, after which a
+The knobs below are sized against the ~5s read eventual-consistency budget. They
+are injected config; the values here are the defaults. The dominant scenario that
+sets the budget is a group kata: many participants write events for ~30 min then
+stop, after which a
 dashboard session reads from saver (an instructor often also watches the
 dashboard live during the active window, which is what motivates the freshness
 and anomaly API below).
 
 Decided:
 
-- backoff-cap = 10s. When a forward to saver fails, the drainer retries with
-  exponential backoff capped at 10s, indefinitely (a queued write, especially a
-  sync-acked test event, is never dropped). The cap bounds the post-recovery
-  pickup delay: once saver is healthy again a held row drains within one cap
-  interval. A long outage therefore blows the 5s FRESHNESS budget (a reader
-  briefly sees stale state) but never loses the write - freshness is bounded by
-  the budget, durability is unconditional.
 - skip-timeout = 5s. The reorder buffer holds an out-of-order event waiting for a
   missing `tab_seq`; if the gap has not filled within 5s the drainer releases
   past it. Out-of-order arrivals are expected to be rare, and waiting 5s for that
-  rare case is acceptable. The skip only ever discards an ITE (a test event is
-  sync-acked, so it can never be the missing seq) and a dropped ITE is harmless
-  because the next event's cumulative file set supersedes it.
-- poll-interval = 250ms. After the drainer drains the buffer (or finds it empty)
-  with saver healthy, it sleeps this long before the next pass, and it is the base
-  the failure backoff doubles from up to backoff-cap. It bounds drainer-primary
-  delivery latency (a write reaches saver within ~250ms plus the forward), well
-  inside the 5s freshness budget, and costs ~4 empty reads/sec when idle. A signal
-  from intake could replace the poll later (both share one process), but the poll
-  meets the budget without the coordination.
+  rare case is acceptable. The skip normally discards an ITE (a sync-acked test
+  event is buffered at intake, so it is never the missing seq), and a dropped ITE
+  is harmless because the next event's cumulative file set supersedes it.
+- poll-interval = 250ms. After the drainer forwards the buffer (or finds it
+  empty), it sleeps this long before the next pass. It bounds drainer delivery
+  latency (a write reaches saver within ~250ms plus the forward), well inside the
+  5s freshness budget, and costs ~4 empty reads/sec when idle. A signal from
+  intake could replace the poll later (both share one process), but the poll meets
+  the budget without the coordination.
 
-Recommended but not yet pinned: backoff jitter; and treating a genuine 4xx
-contract error as park/dead-letter rather than retry-forever, so one poison row
-cannot wedge the ordered channel while transient 5xx/timeout/
-connection-refused failures still retry.
+The drainer forwards each buffered event to saver once, in `tab_seq` order per
+writer, and deletes it without reading the response (fire-and-forget). It never
+inspects success, so no forward is retried and a forward lost while saver is
+unavailable is simply lost; there is no backoff, no poison-write handling, and
+nothing to wedge a shard. Guaranteed delivery to saver - a drainer that acks,
+retries a transient failure, and dead-letters a permanent rejection - is a future
+enhancement (see async-writes-future-enhancements.md).
 
 ## Open questions
 
@@ -884,10 +922,10 @@ connection-refused failures still retry.
   web->saver cross-kata parallelism. The open question is sizing N against saver's
   forward latency (a localhost round-trip plus saver's in-process git commit) and
   peak aggregate write rate, and whether N-way is enough under a large group-kata
-  burst. A shortfall degrades freshness (a backlog forms, writes land late) but
-  never durability (they still land). If N threads on one host are not enough, the
-  next step is multiple hosts - the NATS/Valkey fallback in Alternatives
-  considered. Measure saver forward latency against realistic peak load to pick N.
+  burst. A shortfall degrades freshness (a backlog forms, writes land late). If N
+  threads on one host are not enough, the next step is multiple hosts - the
+  NATS/Valkey fallback in Alternatives considered. Measure saver forward latency
+  against realistic peak load to pick N.
 
 ## Future work: a freshness and anomaly API
 
@@ -897,8 +935,8 @@ spooler is proven because it cannot affect ordering, the eventual-consistency
 budget, or correctness: it only observes.
 
 The governing constraint is what makes this the spooler's job rather than
-saver's. The spooler holds only the LIVE EDGE: undrained plus very recently
-acked rows, deleted after ack. It is therefore a freshness/anomaly lens, NOT an
+saver's. The spooler holds only the LIVE EDGE: rows not yet forwarded, deleted as
+they are sent. It is therefore a freshness/anomaly lens, NOT an
 analytics store. The full history (every committed light over the session) is
 saver's committed stream, which the dashboard already reads. The two are
 complementary: saver answers "what happened", the spooler answers "how current
@@ -906,10 +944,8 @@ is what I am seeing, and is anything stuck".
 
 Freshness (per kata-id):
 
-- backlog depth: rows queued but not yet acked by saver.
-- drain lag: age of the oldest undrained row (enqueued_at to now).
-- drainer-in-backoff: whether saver is currently unreachable (the drainer is
-  retrying under the backoff-cap).
+- backlog depth: rows queued but not yet forwarded to saver.
+- drain lag: age of the oldest un-forwarded row (enqueued_at to now).
 
 Anomalies (things only the spooler can see, because it is the single ordered
 choke point):

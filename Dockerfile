@@ -20,10 +20,6 @@ ENV COMMIT_SHA=${COMMIT_SHA}
 ARG APP_DIR=/spooler
 ENV APP_DIR=${APP_DIR}
 
-# Default port so the image's probes work in a bare `docker run`; the deployed
-# stack overrides this via its env file.
-ENV CYBER_DOJO_SPOOLER_PORT=4590
-
 RUN adduser                        \
   -D               `# no password` \
   -G nogroup       `# no group`    \
