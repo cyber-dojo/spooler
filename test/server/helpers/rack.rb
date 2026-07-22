@@ -7,7 +7,7 @@ module TestHelpersRack
   include Rack::Test::Methods
 
   def app
-    @app ||= App.new(externals)
+    @app ||= App.new(model)
   end
 
   def get_json(path, args)

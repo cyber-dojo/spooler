@@ -18,7 +18,7 @@ class DrainerTest < TestBase
     db.append(path: 'kata_file_edit', body: '{"id":"AbCd3E"}',
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2, enqueued_at: 2000)
     stub = saver_returns(200, '{}')
-    externals.drainer.drain
+    model.drainer.drain
     assert_equal %w(/kata_ran_tests /kata_file_edit), stub.forwarded.map(&:path)
     assert_empty db.buffered_events
   end
@@ -32,7 +32,7 @@ class DrainerTest < TestBase
     db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
     saver_raises(Errno::ECONNREFUSED)
-    externals.drainer.drain
+    model.drainer.drain
     assert_empty db.buffered_events
   end
 
@@ -47,7 +47,7 @@ class DrainerTest < TestBase
     db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 8002)
     stub = saver_returns(200, '{}')
-    externals.drainer.drain
+    model.drainer.drain
     assert_equal %w(/kata_ran_tests /kata_file_edit), stub.forwarded.map(&:path)
     assert_empty db.buffered_events
   end
@@ -65,7 +65,7 @@ class DrainerTest < TestBase
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 3, enqueued_at: held_at)
     time_is(held_at + Drainer::SKIP_TIMEOUT_MS - 1) # gap still younger than the timeout
     stub = saver_returns(200, '{}')
-    externals.drainer.drain
+    model.drainer.drain
     assert_equal %w(/kata_ran_tests), stub.forwarded.map(&:path)
     assert_equal [3], db.buffered_events.map { |event| event['tab_seq'] }
   end
@@ -82,7 +82,7 @@ class DrainerTest < TestBase
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 3, enqueued_at: held_at)
     time_is(held_at + Drainer::SKIP_TIMEOUT_MS) # gap has reached the timeout
     stub = saver_returns(200, '{}')
-    externals.drainer.drain
+    model.drainer.drain
     assert_equal %w(/kata_ran_tests /kata_file_edit), stub.forwarded.map(&:path)
     assert_empty db.buffered_events
   end
@@ -101,12 +101,12 @@ class DrainerTest < TestBase
 
     skip_at = held_at + Drainer::SKIP_TIMEOUT_MS
     time_is(skip_at)
-    externals.drainer.drain # skips the missing 2, forwards 1 and 3
+    model.drainer.drain # skips the missing 2, forwards 1 and 3
 
     db.append(path: 'kata_file_delete', body: '{"id":"AbCd3E"}',
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2, enqueued_at: skip_at + 50)
     time_is(skip_at + 100)
-    externals.drainer.drain # the late tab_seq 2 is below next_expected
+    model.drainer.drain # the late tab_seq 2 is below next_expected
 
     assert_empty db.buffered_events
     refute_includes stub.forwarded.map(&:path), '/kata_file_delete'
@@ -120,7 +120,7 @@ class DrainerTest < TestBase
     db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
               kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
     saver_returns(200, '{}')
-    drainer = externals.drainer
+    drainer = model.drainer
     sleeps = []
     sleeper = lambda do |ms|
       sleeps << ms
