@@ -1,7 +1,6 @@
 require 'net/http'
 require_relative 'drainer'
 require_relative 'external/db'
-require_relative 'external/saver'
 require_relative 'external/time'
 require_relative 'prober'
 require_relative 'spool'
@@ -35,11 +34,6 @@ class Externals
   def prober
     # The liveness/readiness/sha probe collaborator.
     @prober ||= Prober.new
-  end
-
-  def saver
-    # The saver service each buffered write is forwarded to.
-    @saver ||= External::Saver.new(self)
   end
 
   def spool

@@ -1,4 +1,5 @@
 require_relative 'test_base'
+require_relative 'doubles/saver_http_distinct_connections_stub'
 
 class DrainerTest < TestBase
 
@@ -148,7 +149,43 @@ class DrainerTest < TestBase
     assert_empty db.buffered_events
   end
 
+  test 'Dn0012', %w(
+  | each drainer shard forwards through its own saver connection, never one
+  | shared across shards: a single Net::HTTP instance is not safe for the
+  | concurrent forwards of several shard threads, so every worker owns its own
+  ) do
+    db = in_memory_db
+    http = saver_returns_per_connection
+    kata0 = kata_for_shard(shard_count: 2, shard_index: 0)
+    kata1 = kata_for_shard(shard_count: 2, shard_index: 1)
+    db.append(path: 'kata_ran_tests', body: %({"id":"#{kata0}"}),
+              kata_id: kata0, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
+    db.append(path: 'kata_ran_tests', body: %({"id":"#{kata1}"}),
+              kata_id: kata1, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
+    Drainer.new(externals, shard_index: 0, shard_count: 2).drain
+    Drainer.new(externals, shard_index: 1, shard_count: 2).drain
+    assert_equal 2, http.connections.size,
+      'the two shards shared one saver connection instead of owning their own'
+    assert_equal [1, 1], http.connections.map { |connection| connection.requests.size }
+  end
+
   private
+
+  # Inject the distinct-connection http transport so a test can see how many
+  # saver connections the drainers create.
+  def saver_returns_per_connection(code: 200, body: '{}')
+    stub = SaverHttpDistinctConnectionsStub.new(SaverResponseStub.new(code: code, body: body))
+    externals.instance_exec { @http = stub }
+    stub
+  end
+
+  # A kata id that Drainer.shard_of maps to shard_index (of shard_count), so a
+  # test can seed exactly one write per shard.
+  def kata_for_shard(shard_count:, shard_index:)
+    %w(aB3dE7 Xy9k2P Qw4rT6 Zx8cV2 Mn5bH1 Kp7jL9).find do |kata|
+      Drainer.shard_of(kata, shard_count) == shard_index
+    end
+  end
 
   # An http transport (the Externals#http seam) whose every forwarded request
   # raises, standing in for saver being unreachable. Lets a test prove a raised

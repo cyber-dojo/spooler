@@ -1,4 +1,5 @@
 require 'zlib'
+require_relative 'external/saver'
 
 class Drainer
 
@@ -19,13 +20,19 @@ class Drainer
   end
 
   def initialize(externals, shard_index: 0, shard_count: 1)
-    # externals is the service locator (db, saver, time). This worker drains the
-    # katas whose shard_of is shard_index; the default single shard drains all.
+    # externals is the service locator (db, time). This worker drains the katas
+    # whose shard_of is shard_index; the default single shard drains all.
     # next_expected is the per-writer reorder pointer (see drain).
+    #
+    # Each worker owns its own saver client (its own connection) rather than
+    # sharing one: the workers forward concurrently and a single Net::HTTP
+    # instance is not safe for concurrent requests, so a shared connection would
+    # cross one worker's request with another's response.
     @externals = externals
     @shard_index = shard_index
     @shard_count = shard_count
     @next_expected = {}
+    @saver = External::Saver.new(externals)
   end
 
   def drain
@@ -104,7 +111,7 @@ class Drainer
     # Forward one buffered write to saver, fire-and-forget: the response is not
     # read (delivery is best-effort). Rescue so a raised forward (saver
     # unreachable) does not kill the drain thread; the row is deleted either way.
-    @externals.saver.forward(event['path'], event['body'])
+    @saver.forward(event['path'], event['body'])
   rescue StandardError
     nil
   end
