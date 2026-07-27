@@ -1,7 +1,7 @@
 [![Github Action (main)](https://github.com/cyber-dojo/spooler/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/cyber-dojo/spooler/actions)
 
 - A docker-containerized microservice for [https://cyber-dojo.org](http://cyber-dojo.org).
-- An HTTP [Ruby](https://www.ruby-lang.org) [Sinatra](http://sinatrarb.com/) web service that buffers web's write events and forwards them, durably and in order, to [saver](https://github.com/cyber-dojo/saver).
+- An HTTP [Ruby](https://www.ruby-lang.org) [Sinatra](http://sinatrarb.com/) service that buffers [web](https://github.com/cyber-dojo/web)'s write events and forwards them, in order, to [saver](https://github.com/cyber-dojo/saver).
 - Reads stay direct web->saver; only writes flow through the spooler.
 - Demonstrates a [Kosli](https://www.kosli.com/) instrumented [GitHub CI workflow](.github/workflows/main.yml).
 - The design, rationale, and staged rollout are in [docs/adr-async-writes-via-spooler.md](docs/adr-async-writes-via-spooler.md).
