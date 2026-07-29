@@ -42,10 +42,17 @@ class Drainer
     # forward is retried and a forward lost while saver is unavailable is lost.
     # Writers are independent: a gap in one holds only that writer; every other
     # writer still drains.
+    #
+    # A row with no tab_seq (a client that sends none) has no position, so it
+    # takes no part in the ordering: it is released as it stands and never seeds
+    # or advances the writer's reorder pointer.
     mine = @externals.db.buffered_events.select { |event| mine?(event['kata_id']) }
     by_writer = mine.group_by { |event| [event['kata_id'], event['laptop_id']] }
     by_writer.each do |writer, events|
-      drain_writer(writer, events.sort_by { |event| event['tab_seq'] })
+      unsequenced, sequenced = events.partition { |event| event['tab_seq'].nil? }
+      unsequenced.each { |event| release(event) }
+      next if sequenced.empty?
+      drain_writer(writer, sequenced.sort_by { |event| event['tab_seq'] })
     end
   end
 
@@ -55,7 +62,7 @@ class Drainer
     # milliseconds.
     @running = true
     while @running
-      drain
+      drain_pass
       sleeper.call(POLL_INTERVAL_MS)
     end
   end
@@ -66,6 +73,25 @@ class Drainer
   end
 
   private
+
+  def drain_pass
+    # One pass of the drain loop. A raise is logged and swallowed rather than
+    # ending the loop: a row this shard cannot drain would otherwise stop it
+    # draining every other kata it owns, and the row survives to raise again on
+    # the next boot.
+    drain
+  rescue StandardError => error
+    log("drain pass failed: #{error.class}: #{error.message}")
+  end
+
+  def log(message)
+    # Report on the house stream (a per-thread override so a test can capture it,
+    # else $stdout, which is where the container's logs are read from), flushed so
+    # the line is not lost in the buffer.
+    stream = Thread.current[:stdout_stream] || $stdout
+    stream.puts(message)
+    stream.flush
+  end
 
   def mine?(kata_id)
     # Whether this worker's shard owns the kata.
@@ -94,10 +120,16 @@ class Drainer
         return unless skippable?(event)
         @next_expected[writer] = seq
       end
-      forward(event)
-      @externals.db.delete(event['id'])
+      release(event)
       @next_expected[writer] = seq + 1
     end
+  end
+
+  def release(event)
+    # Send one buffered row to saver and drop it from the buffer, whether or not
+    # saver accepted it (delete-on-send, fire-and-forget).
+    forward(event)
+    @externals.db.delete(event['id'])
   end
 
   def skippable?(event)

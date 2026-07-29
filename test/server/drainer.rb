@@ -169,7 +169,86 @@ class DrainerTest < TestBase
     assert_equal [1, 1], http.connections.map { |connection| connection.requests.size }
   end
 
+  test 'Dn0013', %w(
+  | drain forwards a write with no tab_seq and deletes it: a client that sends no
+  | tab_seq has no position, so the write is not held back for ordering
+  ) do
+    db = in_memory_db
+    db.append(path: 'kata_file_edit', body: %({"id":"AbCd3E","laptop_id":"#{laptop_id}"}),
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: nil, enqueued_at: 1000)
+    db.append(path: 'kata_ran_tests', body: %({"id":"AbCd3E","laptop_id":"#{laptop_id}"}),
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: nil, enqueued_at: 2000)
+    stub = saver_returns(200, '{}')
+    model.drainer.drain
+    assert_equal %w(/kata_file_edit /kata_ran_tests), stub.forwarded.map(&:path)
+    assert_empty db.buffered_events
+  end
+
+  test 'Dn0014', %w(
+  | drain forwards a writer's mix of unsequenced and sequenced writes: the write
+  | with no tab_seq is forwarded as it stands, and the sequenced ones still go in
+  | tab_seq order
+  ) do
+    db = in_memory_db
+    db.append(path: 'kata_file_delete', body: %({"id":"AbCd3E","laptop_id":"#{laptop_id}"}),
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: nil, enqueued_at: 1000)
+    db.append(path: 'kata_ran_tests', body: %({"id":"AbCd3E","laptop_id":"#{laptop_id}","tab_seq":1}),
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 2000)
+    db.append(path: 'kata_file_edit', body: %({"id":"AbCd3E","laptop_id":"#{laptop_id}","tab_seq":2}),
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 2, enqueued_at: 3000)
+    stub = saver_returns(200, '{}')
+    model.drainer.drain
+    assert_equal %w(/kata_file_delete /kata_ran_tests /kata_file_edit),
+      stub.forwarded.map(&:path)
+    assert_empty db.buffered_events
+  end
+
+  test 'Dn0015', %w(
+  | a raise inside a drain pass does not end the run loop: the failure is logged
+  | and the next pass still runs, so one row the drainer cannot handle cannot stop
+  | a shard from draining every other kata
+  ) do
+    db = db_raises_once(NoMethodError.new("undefined method '<' for nil"))
+    drainer = model.drainer
+    sleeps = 0
+    sleeper = lambda do |_ms|
+      sleeps += 1
+      drainer.stop if sleeps == 2
+    end
+    _result, stdout, _stderr = with_captured_stdout_stderr do
+      drainer.run(sleeper: sleeper)
+    end
+    assert_equal 2, sleeps, 'the run loop did not survive the raised drain pass'
+    assert_equal 2, db.calls
+    assert_equal "drain pass failed: NoMethodError: undefined method '<' for nil\n", stdout
+  end
+
   private
+
+  # Inject a db (the Externals#db seam) whose first buffered_events call raises,
+  # standing in for a drain pass that blows up on a row it cannot handle. Later
+  # calls report no buffered rows, so a surviving run loop simply drains nothing.
+  def db_raises_once(error)
+    stub = Class.new do
+      def initialize(error)
+        # Hold the error to raise, and count the buffered_events calls made.
+        @error = error
+        @calls = 0
+      end
+
+      # How many drain passes have asked for the buffered rows.
+      attr_reader :calls
+
+      def buffered_events
+        # Raise on the first pass; report an empty buffer on every pass after.
+        @calls += 1
+        raise @error if @calls == 1
+        []
+      end
+    end.new(error)
+    externals.instance_exec { @db = stub }
+    stub
+  end
 
   # Inject the distinct-connection http transport so a test can see how many
   # saver connections the drainers create.
