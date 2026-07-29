@@ -55,6 +55,22 @@ class SpoolPersistTest < TestBase
     assert_equal write_paths.size, db.buffered_events.size
   end
 
+  test 'Sp0005', %w(
+  | a write whose tab_seq is not an integer is rejected at intake with 400 and
+  | never enters the buffer: the drainer releases a writer's writes in numeric
+  | tab_seq order, so a tab_seq it cannot compare could never drain, and buffering
+  | it would leave a poison row. An absent tab_seq is a different case and stays
+  | legal: it claims no position at all
+  ) do
+    spy = db_append_spy
+    body = JSON.parse(ran_tests_body).merge('tab_seq' => 'abc').to_json
+    response, _stdout, _stderr = with_captured_stdout_stderr do
+      post_json('/kata_ran_tests', body)
+    end
+    assert_equal 400, response.status
+    assert_empty spy.appends
+  end
+
   private
 
   def db_append_spy
