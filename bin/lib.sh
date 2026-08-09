@@ -7,7 +7,7 @@ stderr()
 
 exit_non_zero()
 {
-  kill -INT $$
+  exit 42
 }
 
 installed()
