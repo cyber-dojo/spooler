@@ -61,8 +61,7 @@ build_image()
 
   if [ "${CI:-}" != 'true' ]; then
     # In the CI workflow the server image is built once by secure-docker-build.yml
-    # and pulled by the 'Download docker image' job; do not remove or rebuild it.
-    remove_old_images
+    # and pulled by the 'Download docker image' job; do not rebuild it.
     # Locally, both client and server tests need a server image.
     docker --log-level=ERROR compose build server
   fi
@@ -85,6 +84,11 @@ build_image()
     docker --log-level=ERROR tag "${image_name}" "${CYBER_DOJO_SPOOLER_IMAGE}:latest"
     # Tag image-name for local development where the spooler name comes from echo_env_vars
     docker --log-level=ERROR tag "${image_name}" "cyberdojo/spooler:${CYBER_DOJO_SPOOLER_TAG}"
+    # After tagging, so removing an earlier build's tags takes its last tag with
+    # them and the image itself goes, rather than being left dangling when
+    # :latest moves to this build. check_args rejects 'server' inside CI, so the
+    # image pulled by the 'Download docker image' CI job is never at risk here.
+    remove_old_images
     echo
     echo "  echo CYBER_DOJO_SPOOLER_SHA=${CYBER_DOJO_SPOOLER_SHA}"
     echo "  echo CYBER_DOJO_SPOOLER_TAG=${CYBER_DOJO_SPOOLER_TAG}"

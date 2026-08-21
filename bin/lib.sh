@@ -42,19 +42,28 @@ remove_old_images()
   # which slows down image listing. Remove old spooler images continuously.
   # Keeping the :latest tag preserves the image-layer build cache.
   echo Removing old images
-  local -r dil=$(docker image ls --format "{{.Repository}}:{{.Tag}}" | grep spooler)
-  remove_all_but_latest "${dil}" "${CYBER_DOJO_SPOOLER_IMAGE}"
-  remove_all_but_latest "${dil}" cyberdojo/spooler
+  # grep exits non-zero when the machine holds no spooler image, eg one whose
+  # images have just been cleared, so an empty list must not end the build.
+  local -r dil=$(docker image ls --format "{{.Repository}}:{{.Tag}}" | grep spooler || true)
+  remove_all_but_current "${dil}" "${CYBER_DOJO_SPOOLER_IMAGE}"
+  remove_all_but_current "${dil}" cyberdojo/spooler
 }
 
-remove_all_but_latest()
+# Keeps :latest, which preserves the image-layer build cache, and this commit's
+# tag, which names the build just made. Every older tag goes, and an earlier
+# build whose last tag was one of those goes with it.
+remove_all_but_current()
 {
   local -r docker_image_ls="${1}"
   local -r name="${2}"
-  for image_name in $(echo "${docker_image_ls}" | grep "${name}:")
+  # Its own name, not image_name: bash locals are dynamically scoped, and
+  # build_image declares image_name readonly before calling this.
+  local tagged_name
+  for tagged_name in $(echo "${docker_image_ls}" | grep "${name}:" || true)
   do
-    if [ "${image_name}" != "${name}:latest" ]; then
-      docker image rm --force "${image_name}" || echo "  skipped ${image_name} (in use)"
+    if [ "${tagged_name}" != "${name}:latest" ] \
+    && [ "${tagged_name}" != "${name}:${CYBER_DOJO_SPOOLER_TAG}" ]; then
+      docker image rm --force "${tagged_name}" || echo "  skipped ${tagged_name} (in use)"
     fi
   done
 }
