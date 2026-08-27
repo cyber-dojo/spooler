@@ -53,12 +53,13 @@ class TestBase < Id58TestBase
     # becomes true within timeout_s. Used to wait for background drainer threads.
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_s
     until yield
-      # :nocov: - the timeout only fires if the awaited condition never holds,
-      # i.e. a genuine failure, so it never runs in a green test.
+      # The timeout only fires if the awaited condition never holds, i.e. a
+      # genuine failure, so it never runs in a green test.
+      # simplecov:disable
       if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
         flunk("condition not met within #{timeout_s}s")
       end
-      # :nocov:
+      # simplecov:enable
       sleep(0.005)
     end
   end
