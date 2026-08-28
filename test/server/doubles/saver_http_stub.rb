@@ -13,7 +13,10 @@ class SaverHttpStub
   end
 
   def new(_hostname, _port)
-    # HttpJson::Requester calls http.new(hostname, port) once at construction.
+    # HttpJson::Requester calls http.new(hostname, port) per post. Handing back
+    # the one connection gathers every forward in a single record, which is what
+    # a test asserting on the requests sent wants. A test that cares how many
+    # connections were built uses SaverHttpDistinctConnectionsStub instead.
     @connection
   end
 
