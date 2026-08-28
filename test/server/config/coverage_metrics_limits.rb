@@ -6,12 +6,12 @@
 def metrics
   [
     [ nil ],
-    [ 'test.lines.total'    , '<=', 480 ],
+    [ 'test.lines.total'    , '<=', 491 ],
     [ 'test.lines.missed'   , '<=',   0 ],
     [ 'test.branches.total' , '<=',   6 ],
     [ 'test.branches.missed', '<=',   0 ],
     [ nil ],
-    [ 'code.lines.total'    , '<=', 262 ],
+    [ 'code.lines.total'    , '<=', 264 ],
     [ 'code.lines.missed'   , '<=',   0 ],
     [ 'code.branches.total' , '<=',  17 ],
     [ 'code.branches.missed', '<=',   0 ],

@@ -169,6 +169,26 @@ class DrainerTest < TestBase
     assert_equal [1, 1], http.connections.map { |connection| connection.requests.size }
   end
 
+  test 'Dn0016', %w(
+  | one shard's successive forwards each get their own saver connection, never
+  | one connection held across them: Net::HTTP#request mutates the connection's
+  | socket, so a connection outliving its forward is state two threads can share
+  ) do
+    db = in_memory_db
+    http = saver_returns_per_connection
+    kata = kata_for_shard(shard_count: 1, shard_index: 0)
+    db.append(path: 'kata_ran_tests', body: %({"id":"#{kata}"}),
+              kata_id: kata, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
+    db.append(path: 'kata_ran_tests', body: %({"id":"#{kata}"}),
+              kata_id: kata, laptop_id: laptop_id, tab_seq: 2, enqueued_at: 2000)
+    drainer = Drainer.new(externals, shard_index: 0, shard_count: 1)
+    drainer.drain
+    drainer.drain
+    assert_equal 2, http.connections.size,
+      'the two forwards shared one saver connection instead of each owning its own'
+    assert_equal [1, 1], http.connections.map { |connection| connection.requests.size }
+  end
+
   test 'Dn0013', %w(
   | drain forwards a write with no tab_seq and deletes it: a client that sends no
   | tab_seq has no position, so the write is not held back for ordering
