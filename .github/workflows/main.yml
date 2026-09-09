@@ -59,7 +59,10 @@ jobs:
         with:
           flow_description: "Async write spooler: durable, ordered forwarding to saver"
           flow_tags: |
+            ci=github
             env=${{ env.KOSLI_AWS_BETA }}
+            kind=build
+            url=https://github.com/cyber-dojo/spooler
 
 
   pull-request:
