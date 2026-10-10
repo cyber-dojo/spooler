@@ -63,11 +63,11 @@ build_image()
     # In the CI workflow the server image is built once by secure-docker-build.yml
     # and pulled by the 'Download docker image' job; do not rebuild it.
     # Locally, both client and server tests need a server image.
-    docker --log-level=ERROR compose build server
+    docker compose build server
   fi
 
   if [ "${type}" == 'client' ]; then
-    docker --log-level=ERROR compose build client
+    docker compose build client
   fi
 
   local -r image_name="${CYBER_DOJO_SPOOLER_IMAGE}:${CYBER_DOJO_SPOOLER_TAG}"
@@ -81,7 +81,7 @@ build_image()
 
   if [ "${type}" == 'server' ]; then
     # Tag image-name for local development where the spooler name comes from echo_env_vars
-    docker --log-level=ERROR tag "${image_name}" "cyberdojo/spooler:${CYBER_DOJO_SPOOLER_TAG}"
+    docker tag "${image_name}" "cyberdojo/spooler:${CYBER_DOJO_SPOOLER_TAG}"
     # After tagging, so this build is protected by its own tag, and removing an
     # earlier build's tags takes its last tag with them and the image itself
     # goes. check_args rejects 'server' inside CI, so the image pulled by the

@@ -110,7 +110,7 @@ run_tests()
   check_args "$@"
   exit_non_zero_unless_installed docker
   containers_down
-  docker --log-level=ERROR compose --progress=plain up --build --wait --wait-timeout=10 "${TYPE}"
+  docker compose --progress=plain up --build --wait --wait-timeout=10 "${TYPE}"
   # Resolved here (not in check_args) because the container does not exist
   # until the compose up above has brought it up.
   export CONTAINER_NAME="$(service_container "${TYPE}")"
