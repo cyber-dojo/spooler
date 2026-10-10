@@ -2,7 +2,6 @@
 services:
 
   client:
-    platform: linux/amd64
     depends_on: [ server ]
     build:
       context: source/client
@@ -20,7 +19,6 @@ services:
       - ./test/client:/spooler/test:ro
 
   server:
-    platform: linux/amd64
     depends_on: [ saver ]
     build:
       context: .
@@ -45,7 +43,6 @@ services:
   # differ. Integration tests write through the spooler and read back from this
   # saver to confirm the writes landed.
   saver:
-    platform: linux/amd64
     image: ${CYBER_DOJO_SAVER_IMAGE}:${CYBER_DOJO_SAVER_TAG}
     user: ${CYBER_DOJO_SAVER_SERVER_USER}
     env_file: [ .env ]
