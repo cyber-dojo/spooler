@@ -19,13 +19,6 @@ module HttpJsonHash
       end
     end
 
-    def post(path, args)
-      # Send a POST to /path with a JSON-encoded args body.
-      request(path, args) do |uri|
-        @http.post(uri)
-      end
-    end
-
     private
 
     def request(path, args)

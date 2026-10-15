@@ -1,19 +1,18 @@
 
 # Deployment bar: full coverage (missed == 0) for both source and test code.
-# It is expected to FAIL in these early stages (dead code paths not yet
-# exercised) and must pass before deployment. The total caps only guard
-# against unnoticed growth; the missed limits are the real gate.
+# The total caps only guard against unnoticed growth; the missed limits are
+# the real gate.
 def metrics
   [
     [ nil ],
-    [ 'test.lines.total'    , '<=',  43 ],
+    [ 'test.lines.total'    , '<=',  79 ],
     [ 'test.lines.missed'   , '<=',   0 ],
     [ 'test.branches.total' , '<=',   0 ],
     [ 'test.branches.missed', '<=',   0 ],
     [ nil ],
-    [ 'code.lines.total'    , '<=',  98 ],
-    [ 'code.lines.missed'   , '<=',  12 ],
+    [ 'code.lines.total'    , '<=', 113 ],
+    [ 'code.lines.missed'   , '<=',   0 ],
     [ 'code.branches.total' , '<=',   2 ],
-    [ 'code.branches.missed', '<=',   1 ],
+    [ 'code.branches.missed', '<=',   0 ],
   ]
 end

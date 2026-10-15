@@ -1,6 +1,4 @@
-require_relative 'silently'
 require 'sinatra/base'
-silently { require 'sinatra/contrib' } # N x "warning: method redefined"
 require_relative 'lib/json_adapter'
 require_relative 'lib/utf8_clean'
 require_relative 'request_error'
@@ -8,8 +6,6 @@ require 'json'
 
 class AppBase < Sinatra::Base
 
-  silently { register Sinatra::Contrib } # respond_to
-  set :json_encoder, Sinatra::JSON       # avoids MultiJson.encode deprecation warning
   set :port, ENV['PORT']
   set :host_authorization, { permitted_hosts: [] } # https://github.com/sinatra/sinatra/issues/2065#issuecomment-2484285707
 
@@ -26,12 +22,8 @@ class AppBase < Sinatra::Base
   def self.get_json(klass_name, method_name)
     # Register a GET route that dispatches to model.klass_name.method_name.
     get "/#{method_name}", provides:[:json] do
-      respond_to do |format|
-        format.json do
-          args = to_json_object(request_body)
-          json_result(klass_name, method_name, args)
-        end
-      end
+      args = to_json_object(request_body)
+      json_result(klass_name, method_name, args)
     end
   end
 
