@@ -1,5 +1,6 @@
 require 'zlib'
 require_relative 'external/saver'
+require_relative 'lib/log_stream'
 
 class Drainer
 
@@ -44,16 +45,11 @@ class Drainer
     # writer still drains.
     #
     # A row with no tab_seq (a client that sends none) has no position, so it
-    # takes no part in the ordering: it is released as it stands and never seeds
-    # or advances the writer's reorder pointer.
-    mine = @externals.db.buffered_events.select { |event| mine?(event['kata_id']) }
-    by_writer = mine.group_by { |event| [event['kata_id'], event['laptop_id']] }
-    by_writer.each do |writer, events|
-      unsequenced, sequenced = events.partition { |event| event['tab_seq'].nil? }
-      unsequenced.each { |event| release(event) }
-      next if sequenced.empty?
-      drain_writer(writer, sequenced.sort_by { |event| event['tab_seq'] })
-    end
+    # takes no part in any writer's ordering: it is released as it stands and
+    # never seeds or advances a writer's reorder pointer.
+    unsequenced, sequenced = mine.partition { |event| event['tab_seq'].nil? }
+    unsequenced.each { |event| release(event) }
+    by_writer(sequenced).each { |writer, events| release_in_order(writer, events) }
   end
 
   def run(sleeper: ->(ms) { sleep(ms / 1000.0) })
@@ -85,10 +81,9 @@ class Drainer
   end
 
   def log(message)
-    # Report on the house stream (a per-thread override so a test can capture it,
-    # else $stdout, which is where the container's logs are read from), flushed so
-    # the line is not lost in the buffer.
-    stream = Thread.current[:stdout_stream] || $stdout
+    # Report on the service's log stream, flushed so the line is not lost in the
+    # buffer.
+    stream = LogStream.current
     stream.puts(message)
     stream.flush
   end
@@ -98,7 +93,19 @@ class Drainer
     self.class.shard_of(kata_id, @shard_count) == @shard_index
   end
 
-  def drain_writer(writer, events)
+  def mine
+    # The buffered rows of the katas this worker's shard owns.
+    @externals.db.buffered_events.select { |event| mine?(event['kata_id']) }
+  end
+
+  def by_writer(events)
+    # events grouped by writer, { [kata_id, laptop_id] => its rows, tab_seq
+    # ascending }. Every writer grouped has at least one row.
+    events.group_by { |event| [event['kata_id'], event['laptop_id']] }
+          .transform_values { |rows| rows.sort_by { |event| event['tab_seq'] } }
+  end
+
+  def release_in_order(writer, events)
     # events are this writer's buffered rows, tab_seq ascending. Forward them in
     # tab_seq order from next_expected, seeded at first sight from the lowest
     # buffered seq (delete-on-send removes forwarded rows, so the buffer alone
@@ -111,15 +118,27 @@ class Drainer
     # whether or not saver accepted it.
     @next_expected[writer] ||= events.first['tab_seq']
     events.each do |event|
-      seq = event['tab_seq']
-      if seq < @next_expected[writer]
-        @externals.db.delete(event['id'])
-        next
-      end
-      if seq > @next_expected[writer]
-        return unless skippable?(event)
-        @next_expected[writer] = seq
-      end
+      break if held?(writer, event)
+      pass(writer, event)
+    end
+  end
+
+  def held?(writer, event)
+    # Whether event is above the writer's next_expected (a gap) and still
+    # younger than the skip-timeout: it, and every row after it, waits for a
+    # later pass.
+    event['tab_seq'] > @next_expected[writer] && !skippable?(event)
+  end
+
+  def pass(writer, event)
+    # Move the writer's reorder pointer past event. A row below next_expected is
+    # already past, so it is dropped (deleted unsent). Any other row is next in
+    # order, or past a gap aged beyond the skip-timeout: it is released, and the
+    # seq after it is expected next.
+    seq = event['tab_seq']
+    if seq < @next_expected[writer]
+      @externals.db.delete(event['id'])
+    else
       release(event)
       @next_expected[writer] = seq + 1
     end

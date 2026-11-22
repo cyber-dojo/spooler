@@ -1,5 +1,6 @@
 require 'sinatra/base'
 require_relative 'lib/json_adapter'
+require_relative 'lib/log_stream'
 require_relative 'lib/utf8_clean'
 require_relative 'request_error'
 require 'json'
@@ -63,12 +64,17 @@ class AppBase < Sinatra::Base
   end
 
   def to_json_object(body)
-    # Parse the request body into a Hash of args (an empty body is no args).
-    json = body == '' ? {} : json_parse(body)
-    unless json.instance_of?(Hash)
-      fail RequestError, 'body is not JSON Hash'
-    end
+    # The request body as a Hash of args: an empty body is no args, and any
+    # JSON value other than a Hash is refused.
+    return {} if body == ''
+    json = parsed_json(body)
+    fail RequestError, 'body is not JSON Hash' unless json.instance_of?(Hash)
     json
+  end
+
+  def parsed_json(body)
+    # body parsed as JSON. A body that is not JSON is refused.
+    json_parse(body)
   rescue JSON::ParserError
     fail RequestError, 'body is not JSON'
   end
@@ -103,8 +109,8 @@ class AppBase < Sinatra::Base
   # - - - - - - - - - - - - - - - - - - - - - -
 
   def stdout_stream
-    # The stream errors are logged to (per-thread override, else $stdout).
-    Thread.current[:stdout_stream] || $stdout
+    # The stream errors are logged to: the service's log stream.
+    LogStream.current
   end
 
   def request_body

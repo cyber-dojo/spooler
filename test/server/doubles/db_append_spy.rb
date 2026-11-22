@@ -14,18 +14,13 @@ class DbAppendSpy
 
   def append(path:, body:, kata_id:, laptop_id:, tab_seq:, enqueued_at:)
     # Record one persisted write instead of storing it; return a stand-in row
-    # id (the caller may pass it back to delete).
+    # id, as External::Db#append returns the new row's id.
     @appends << {
       path: path, body: body,
       kata_id: kata_id, laptop_id: laptop_id, tab_seq: tab_seq,
       enqueued_at: enqueued_at
     }
     @appends.size
-  end
-
-  def delete(_id)
-    # This double observes appends only; draining (delete-on-ack) is exercised
-    # against a real in-memory Db, so a delete here is accepted and ignored.
   end
 
 end
