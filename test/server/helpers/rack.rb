@@ -7,7 +7,9 @@ module TestHelpersRack
   include Rack::Test::Methods
 
   def app
-    @app ||= App.new(model)
+    # The app Rack::Test sends each request to, built on the test's model, so
+    # every request sees the same spool, prober and externals.
+    App.new(model)
   end
 
   def get_json(path, args)

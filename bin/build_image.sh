@@ -32,7 +32,7 @@ check_args()
       ;;
     'server')
       if [ -n "${CI:-}" ] ; then
-        stderr "Inside CI workflow the server image comes from secure-docker-build.yml, not this script"
+        stderr "Inside CI workflow the server image comes from secure-docker-build-from-bare-image.yml, not this script"
         exit_non_zero
       fi
       ;;
@@ -60,7 +60,7 @@ build_image()
   containers_down
 
   if [ "${CI:-}" != 'true' ]; then
-    # In the CI workflow the server image is built once by secure-docker-build.yml
+    # In the CI workflow the server image is built once by secure-docker-build-from-bare-image.yml
     # and pulled by the 'Download docker image' job; do not rebuild it.
     # Locally, both client and server tests need a server image.
     docker compose build server

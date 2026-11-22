@@ -112,6 +112,27 @@ class DrainerTest < TestBase
     refute_includes stub.forwarded.map(&:path), '/kata_file_delete'
   end
 
+  test 'Dn0019', %w(
+  | a gap that opens after a writer has already drained is held too: tab_seq 1
+  | is forwarded on one pass, and a later pass finding only tab_seq 3 (2 missing,
+  | younger than the skip-timeout) holds it rather than re-seeding from 3
+  ) do
+    db = in_memory_db
+    stub = saver_returns(200, '{}')
+    drainer = model.drainer
+    db.append(path: 'kata_ran_tests', body: '{"id":"AbCd3E"}',
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
+    time_is(1100)
+    drainer.drain
+    held_at = 3000
+    db.append(path: 'kata_file_edit', body: '{"id":"AbCd3E"}',
+              kata_id: 'AbCd3E', laptop_id: laptop_id, tab_seq: 3, enqueued_at: held_at)
+    time_is(held_at + Drainer::SKIP_TIMEOUT_MS - 1) # gap still younger than the timeout
+    drainer.drain
+    assert_equal %w(/kata_ran_tests), stub.forwarded.map(&:path)
+    assert_equal [3], db.buffered_events.map { |event| event['tab_seq'] }
+  end
+
   test 'Dn0010', %w(
   | run drains then sleeps the poll interval between passes, until stop ends the
   | loop
@@ -144,9 +165,38 @@ class DrainerTest < TestBase
     end
     Drainer.new(externals, shard_index: 0, shard_count: 2).drain
     remaining = db.buffered_events.map { |event| event['kata_id'] }.sort
-    assert_equal katas.reject { |kata| Drainer.shard_of(kata, 2).zero? }.sort, remaining
+    assert_equal %w(Mn5bH1 Qw4rT6 Zx8cV2 aB3dE7), remaining
     Drainer.new(externals, shard_index: 1, shard_count: 2).drain
     assert_empty db.buffered_events
+  end
+
+  test 'Dn0017', %w(
+  | shard_of maps a kata id to its shard by a stable hash (crc32), the same in
+  | every worker process, so the workers agree on which of them owns each kata
+  ) do
+    katas = %w(aB3dE7 Xy9k2P Qw4rT6 Zx8cV2 Mn5bH1 Kp7jL9)
+    shards = katas.to_h { |kata| [kata, Drainer.shard_of(kata, 2)] }
+    expected = {
+      'aB3dE7' => 1, 'Xy9k2P' => 0, 'Qw4rT6' => 1,
+      'Zx8cV2' => 1, 'Mn5bH1' => 1, 'Kp7jL9' => 0
+    }
+    assert_equal expected, shards
+  end
+
+  test 'Dn0018', %w(
+  | a shard that owns none of the buffered katas forwards nothing and leaves
+  | every row in the buffer for the shards that own them
+  ) do
+    db = in_memory_db
+    stub = saver_returns(200, '{}')
+    %w(aB3dE7 Qw4rT6).each_with_index do |kata, i|
+      db.append(path: 'kata_ran_tests', body: %({"id":"#{kata}"}),
+                kata_id: kata, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000 + i)
+    end
+    Drainer.new(externals, shard_index: 0, shard_count: 2).drain
+    assert_empty stub.forwarded
+    remaining = db.buffered_events.map { |event| event['kata_id'] }
+    assert_equal %w(aB3dE7 Qw4rT6), remaining
   end
 
   test 'Dn0012', %w(
@@ -156,8 +206,8 @@ class DrainerTest < TestBase
   ) do
     db = in_memory_db
     http = saver_returns_per_connection
-    kata0 = kata_for_shard(shard_count: 2, shard_index: 0)
-    kata1 = kata_for_shard(shard_count: 2, shard_index: 1)
+    kata0 = 'Xy9k2P' # in shard 0 of 2
+    kata1 = 'aB3dE7' # in shard 1 of 2
     db.append(path: 'kata_ran_tests', body: %({"id":"#{kata0}"}),
               kata_id: kata0, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
     db.append(path: 'kata_ran_tests', body: %({"id":"#{kata1}"}),
@@ -176,7 +226,7 @@ class DrainerTest < TestBase
   ) do
     db = in_memory_db
     http = saver_returns_per_connection
-    kata = kata_for_shard(shard_count: 1, shard_index: 0)
+    kata = 'aB3dE7' # every kata is in the one shard of 1
     db.append(path: 'kata_ran_tests', body: %({"id":"#{kata}"}),
               kata_id: kata, laptop_id: laptop_id, tab_seq: 1, enqueued_at: 1000)
     db.append(path: 'kata_ran_tests', body: %({"id":"#{kata}"}),
@@ -276,14 +326,6 @@ class DrainerTest < TestBase
     stub = SaverHttpDistinctConnectionsStub.new(SaverResponseStub.new(code: code, body: body))
     externals.instance_exec { @http = stub }
     stub
-  end
-
-  # A kata id that Drainer.shard_of maps to shard_index (of shard_count), so a
-  # test can seed exactly one write per shard.
-  def kata_for_shard(shard_count:, shard_index:)
-    %w(aB3dE7 Xy9k2P Qw4rT6 Zx8cV2 Mn5bH1 Kp7jL9).find do |kata|
-      Drainer.shard_of(kata, shard_count) == shard_index
-    end
   end
 
   # An http transport (the Externals#http seam) whose every forwarded request

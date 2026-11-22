@@ -1,2 +1,4 @@
 # The client build context is source/client (see docker-compose.yml); the
-# Dockerfile copies all of it, so nothing needs excluding here.
+# Dockerfile copies all of it, apart from Claude Code's local working dirs,
+# which are never part of the image.
+**/.claude

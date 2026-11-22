@@ -110,7 +110,13 @@ run_tests()
   check_args "$@"
   exit_non_zero_unless_installed docker
   containers_down
-  docker compose --progress=plain up --build --wait --wait-timeout=10 "${TYPE}"
+  # In the bare image (bin/run_tests_bare.sh) nothing is built: a build would
+  # be of the deployed image, tagged with the bare image's name.
+  local build=--build
+  if [ -n "${CYBER_DOJO_SPOOLER_BARE_IMAGE:-}" ]; then
+    build=--no-build
+  fi
+  docker compose --progress=plain up "${build}" --wait --wait-timeout=10 "${TYPE}"
   # Resolved here (not in check_args) because the container does not exist
   # until the compose up above has brought it up.
   export CONTAINER_NAME="$(service_container "${TYPE}")"
